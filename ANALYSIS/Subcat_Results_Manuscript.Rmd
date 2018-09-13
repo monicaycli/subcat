@@ -1,0 +1,1120 @@
+---
+title: "Subcat Results for Manuscript"
+author: "Monica Li"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+output:
+  html_document:
+    theme: united
+    highlight: pygments
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+# change directory
+# setwd("~/Google-Drive/Projects/BRAZE/SUBCAT/3_ANALYSIS/")
+setwd("~/SUBCAT/3_ANALYSIS/")
+
+# knitr chunk settings
+knitr::opts_chunk$set(cache = TRUE,  cache.lazy = FALSE, cache.comments = FALSE,
+                      autodep = TRUE, echo = FALSE)
+knitr::dep_auto()
+
+# knitr format setting
+options(knitr.table.format = "html")
+
+# import functions
+library(Hmisc)
+library(MASS)
+library(car)
+library(knitr)
+library(ggplot2)
+library(reshape)
+library(plyr)
+library(grid)
+library(gridExtra)
+library(cluster)
+source("my.pairscor.R")
+source("et_tools_subcat.r")
+library(lme4)
+library(kableExtra)
+library(tidyr)
+library(magrittr)
+```
+
+```{r env info, include=TRUE}
+devtools::session_info()
+```
+
+# Inidividual Differences Data
+```{r import individual differences data, echo=FALSE, include=FALSE}
+# read in data
+kidlex_ids <- read.table("../2_DATA/kidlex_ids.txt",sep = "\t",header = T)
+
+# remove invalid data point(s)
+kidlex_ids$towre.nw.time[kidlex_ids$towre.nw.time > 45] <- NA
+
+# unfactor certain columns
+kidlex_ids$gort.fluen <- as.numeric(as.character(kidlex_ids$gort.fluen))
+kidlex_ids$gort.wpm   <- as.numeric(as.character(kidlex_ids$gort.wpm))
+kidlex_ids$gort.time  <- as.numeric(as.character(kidlex_ids$gort.time))
+
+# re-calculate some scores
+# items per minute
+kidlex_ids$towre.w.ipm <- with(kidlex_ids, (towre.w.acc/towre.w.time)*60)
+kidlex_ids$towre.nw.ipm <- with(kidlex_ids, (towre.nw.acc/towre.nw.time)*60)
+
+# set min values for print experience (authors and magazines) as 0
+kidlex_ids$art[kidlex_ids$art < 0] <- 0
+kidlex_ids$mrt[kidlex_ids$mrt < 0] <- 0
+
+# add Gates-MacGinitie grade equivalent scores
+ge.table <- read.csv("../2_DATA/Gates NCE Table new 2.csv",header = T)
+ge.table %<>% 
+  rename(c(Raw.Score = "gm.rcomp.raw", GE = "gm.rcomp.grade")) %>%
+  subset(select = c(gm.rcomp.raw, gm.rcomp.grade))
+row.names(ge.table) <- ge.table$gm.rcomp.raw
+kidlex_ids$gm.rcomp.grade <- ge.table$gm.rcomp.grade[kidlex_ids$gm.rcomp.raw]
+```
+
+```{r categorize ID measures, echo=FALSE, fig.width=7, fig.height=7}
+# including
+vrcomp <- c("gm.rcomp.raw","piat.r.raw","fr.raw","wj3.rcomp.raw")
+vlcomp <- c("piat.l.raw","wj3.oralcomp.raw")
+vvocab <- c("ppvt.raw","wasi.vocab.raw")
+vdecode <- c("towre.w.acc","wj3.wid.raw","towre.nw.acc","wj3.watt.raw")
+vfluen <- c("gort.fluen","wj3.rf.raw")
+vran <- c("ctopp.rcn","ctopp.rdn","ctopp.rln")
+vphono <- c("ctopp.blending","ctopp.elision","ctopp.dspan","ctopp.nwrep")
+vsspan <- c("sspan2.raw")
+vprint <- c("art","mrt")
+vgeneral <- c("wasi.matr.raw","corsi","wasi.iq")
+vdemo <- c("age.dec","edu.years","ses.2.status")
+vars <- c(vrcomp, vlcomp, vvocab, vdecode, vfluen, vran, vphono, vsspan, vprint, vgeneral, vdemo)
+vgrade <- c("gm.rcomp.grade","piat.r.grade","wj3.rcomp.grade",
+            "piat.l.grade","wj3.oralcomp.grade",
+            "wj3.wid.grade","wj3.watt.grade","wj3.rf.grade")
+```
+
+## Descriptive Statistics of Individual Differences Measures
+  * only subjects whose id number is less or equal to 200 participated in the Subcat eyetracking task
+  * the following subjects are removed from analyses:
+    - **134, 142, 148, 166**: actually did not participate in Subcat
+    - **146**: not listed in the master subject list (ID measures)
+    - **133**: eyetracking data corrupted
+    - **175**: did not complete significant portions of the ID tasks
+    - **126**: influential data point based on QQ plot
+    - **138**: 7 out of 15 critical trials were aborted
+  * there are 60 subjects left after exclusion
+  * based on the exclusion information above, there were 64 subjects who took part in Subcat
+```{r descriptive stats of ID measures, cols.print=15}
+# select measures of interest
+data_ids_w_grade <- kidlex_ids[c("subj", vars, vgrade)]
+
+# convert dataframe's row name into subject number
+row.names(data_ids_w_grade) <- factor(as.numeric(gsub("A108(.*)[A-z]{2}","\\1", data_ids_w_grade$subj)))
+
+# exclude subjects
+#134, 142, 148, 166: actually did not participate in Subcat
+#133: eyetracking data corrupted
+#175: did not complete significant portions of the ID tasks
+#126: influential data point based on QQ plot
+#146: not listed in the master subject list (ID measures)
+#138: 7 out of 15 critical trials were aborted
+data_ids_w_grade %<>%
+  subset(row.names(.) <= 200 & !row.names(.) %in% c(126,133,134,138,142,146,148,166,175))
+
+ds_data_ids <- psych::describe(data_ids_w_grade)
+as.data.frame(ds_data_ids)
+```
+
+## Box-Cox \(\lambda\) for raw scores (before imputation)
+  * values of \(\lambda\): default (-2, 2) in steps of 0.1
+  * \(\lambda\) values based on original data will be included in the descriptive table
+```{r calculate box-cox lambda for ID measures, echo=FALSE}
+data <- data_ids_w_grade[c(vars)]
+
+bestLambda <- list()
+for (i in seq(ncol(data))) {
+  if (0 %in% data[[i]]) {
+    bc <- boxcox(lm(data[[i]]+mean(data[[i]])~1), plotit = F)
+  } else {
+    bc <- boxcox(lm(data[[i]]~1), plotit = F)
+  }
+  bestLambda <- cbind(bestLambda, bc$x[which.max(bc$y)])
+}
+
+t_bestLambda <- data.frame(ID = names(data), lambda = unlist(t(bestLambda)))
+
+kable(t_bestLambda, format = "markdown")
+```
+
+## Multiple imputation to fill in missing data
+  * Four data points missing
+    * fr.raw: subject 185
+    * gort.fluen: subject 171
+    * wj3.rf.raw: subject 140
+    * sspan2.raw: subject 187
+```{r multiple imputation for missing data in ID measures, include=FALSE}
+# check to see missing data don't exceed 5%
+pMiss <- function(x){sum(is.na(x))/length(x)*100}
+apply(data,2,pMiss)
+apply(data,1,pMiss)
+
+# check missing data pattern
+library(mice)
+md.pattern(data)
+
+# run imputation
+tempData <- mice(data,m = 5,maxit = 50,meth = 'pmm',seed = 500)
+summary(tempData)
+
+# Replace missing values with the imputed values in the first of the five datasets.
+completedData <- complete(tempData,1)
+```
+
+```{r invert variables, include=FALSE}
+# make a copy of the imputated data
+# transform measures where higher scores indicate poorer performance by subtracting individual scores from their correspoding maximum observed scores
+data_trans <- completedData
+data_trans$ctopp.rcn <- max(data_trans$ctopp.rcn) - data_trans$ctopp.rcn
+data_trans$ctopp.rdn <- max(data_trans$ctopp.rdn) - data_trans$ctopp.rdn
+data_trans$ctopp.rln <- max(data_trans$ctopp.rln) - data_trans$ctopp.rln
+```
+
+```{r box-cox transformation and standardization, include=FALSE}
+# BOX-COX TRANSFORMATION & STANDARDIZATION
+data <- data_trans
+
+# find the best lambda for each variable
+bestLambda <- list()
+for (i in seq(ncol(data))) {
+  if (0 %in% data[[i]]) {
+    bc <- boxcox(lm(data[[i]]+mean(data[[i]])~1), plotit = F)
+  } else {
+    bc <- boxcox(lm(data[[i]]~1), plotit = F)
+  }
+  bestLambda <- cbind(bestLambda, bc$x[which.max(bc$y)])
+}
+
+# boxcox transformation
+data.bc <- data
+for (i in seq(ncol(data.bc))) {
+  if (0 %in% data.bc[[i]]) {
+    data.bc[[i]] <- data.bc[[i]] + mean(data.bc[[i]])
+  }
+  data.bc[[i]] <- bcPower(data.bc[[i]], bestLambda[[i]])
+}
+
+# standardization  
+data.bc.st <- apply(data.bc, 2, function(x) (x - mean(x))/sd(x))
+```
+
+## Correlation matrix for ID measures
+```{r correlation matrix for ID measures}
+# correlation matrix
+data_cormtx <- data.frame(cor(data.bc.st, method = "pearson"))
+data_cormtx <- sapply(data_cormtx, 
+                      function(val) { sub("^(-?)0.", "\\1.", sprintf("%.2f", val)) })
+data_cormtx[upper.tri(data_cormtx)] <- ''
+diag(data_cormtx) <- ''
+# write.csv(data_cormtx, "correlation_matrix_r.csv")
+data.frame(data_cormtx)
+```
+
+## Correlation matrix for composites
+  * composites are averaged across measures and standardized
+```{r create and standardize composites}
+data_composite <- data.frame(matrix(ncol = 11, nrow = 60))
+colnames(data_composite) <- c("Reading Comprehension",
+                              "Oral Comprehension & Vocabulary",
+                              "Decoding",
+                              "Fluency",
+                              "RAN",
+                              "Phonological Skills",
+                              "Verbal Working Memory",
+                              "Print Experience",
+                              "Matrix Reasoning",
+                              "Visuospatial Memory",
+                              "IQ")
+# average variables
+data_composite$`Reading Comprehension`            <- rowMeans(data.bc.st[,vrcomp])
+data_composite$`Oral Comprehension & Vocabulary`  <- rowMeans(data.bc.st[,c(vlcomp,vvocab)])
+data_composite$Decoding                           <- rowMeans(data.bc.st[,vdecode])
+data_composite$Fluency                            <- rowMeans(data.bc.st[,vfluen])
+data_composite$RAN                                <- rowMeans(data.bc.st[,vran])
+data_composite$`Phonological Skills`              <- rowMeans(data.bc.st[,vphono])
+data_composite$`Verbal Working Memory`            <- data.bc.st[,vsspan]
+data_composite$`Print Experience`                 <- rowMeans(data.bc.st[,vprint])
+data_composite$`Matrix Reasoning`                 <- data.bc.st[,"wasi.matr.raw"]
+data_composite$`Visuospatial Memory`              <- data.bc.st[,"corsi"]
+data_composite$IQ                                 <- data.bc.st[,"wasi.iq"]
+
+# standardize composite scores
+data_composite.st <- data.frame(apply(data_composite, 2, function(x) (x - mean(x))/sd(x)))
+```
+
+### Pearson correlation
+```{r pearson correlation matrix for composites}
+# correlation matrix for the composite scores (pearson)
+data_composite.st_cormtx <- data.frame(cor(data_composite.st, method = "pearson"))
+data_composite.st_cormtx <- sapply(data_composite.st_cormtx,
+                      function(val) { sub("^(-?)0.", "\\1.", sprintf("%.2f", val)) })
+data_composite.st_cormtx[upper.tri(data_composite.st_cormtx)] <- ""
+diag(data_composite.st_cormtx) <- ""
+# write.csv(data_composite.st_cormtx, "composite_correlation_matrix_pearson.csv")
+data.frame(data_composite.st_cormtx)
+```
+
+### Spearman correlation
+```{r spearman correlation matrix for composites}
+# correlation matrix for the composite scores (spearman rank order)
+rank_cor <- rcorr(as.matrix(data_composite.st), type = "spearman")
+rank_cor_mat <- data.frame(rank_cor$r)
+rank_cor_mat <- sapply(rank_cor_mat,
+                      function(val) { sub("^(-?)0.", "\\1.", sprintf("%.2f", val)) })
+rank_cor_mat[upper.tri(rank_cor_mat)] <- ""
+diag(rank_cor_mat) <- ""
+# write.csv(rank_cor_mat, "composite_correlation_matrix_spearman.csv")
+data.frame(rank_cor_mat)
+```
+
+# Eyetracking Data
+## Fixation Proportion by Groups
+  * based on phonological skills composite
+```{r grouping participants into tertiles based on composite scores, echo=FALSE}
+cat_idx <- data.frame(subj = row.names(data), 
+                      phono.composite = data_composite.st$Phonological.Skills)
+
+cat_idx$groups.phono.3 <- cut(cat_idx$phono.composite, 
+                      breaks = quantile(cat_idx$phono.composite, probs = seq(0,1,1/3)),
+                      include.lowest = TRUE,
+                      right = FALSE)
+levels(cat_idx$groups.phono.3) <- c("low (0-33.33%)","mid (33.33-66.67%)","high (66.67-100%)")
+```
+
+## Trial abortion information
+  * a trial would be aborted by the experimenter if one of the following steps was not correctly executed:
+      1. move and hover mouse cursor on the image specified in the first instruction (e.g., "point to the saw")
+      2. click on the target following the second (**critical**) instruction (e.g., "now the beak...")
+      3. drag target picture to a location specified in the second instruction
+  * the experimental script was written in a way that only the correct target could be picked up, and the trial will only end if all of the three steps above were carried out correctly
+```{r subcat trial abortion info}
+Acc <- read.csv("../2_DATA/trials.csv", header = T)
+
+Acc_rm <-
+  Acc %>%
+  mutate(., trialid = trialid + 1) %>%
+  mutate(., subj = (gsub("ec(.*)[A-z]{2}", "\\1", subj) %>% as.numeric %>% factor)) %>%
+  subset(!(subj %in% c("126","133","134","138","142","146","148","166","175")))
+```
+
+```{r load eyetracking data, echo=FALSE, include=FALSE}
+filepath <- "../2_DATA/subcat_n64_mirman_repairedROIs.2015.12.15.txt"
+dat <- readFixationReport(filepath, screenSize = c(1024,768))
+
+# change subject id format
+dat$SUBJECT <- factor(as.numeric(gsub("ec(.*)[A-z]{2}","\\1",dat$SUBJECT)))
+
+# merge accuracy info and eyetracking data, remove subjects, remove aborted trials
+dat <-
+  merge(dat, Acc_rm, by.x = c("SUBJECT","TRIAL"), by.y = c("subj","trialid")) %>%
+  subset(aborted == FALSE) %>%
+  droplevels
+
+# rearrange level order for COND
+dat$COND <- factor(dat$COND, levels = c("W1W1","W2W1","N3W1","Filler"))
+
+# CROSS PADDING
+# sort the dataframe by SUBJECT, TRIAL, and CURRENT_FIX_START
+dat <- dat[with(dat,order(SUBJECT,TRIAL,CURRENT_FIX_START)),]
+# extract the last row of each trial from each subject
+lastrow <- dat[!duplicated(dat[c("SUBJECT","TRIAL")],fromLast = TRUE),]
+# change the start time (to the end time of the last fixation point)
+lastrow$CURRENT_FIX_START <- lastrow$CURRENT_FIX_END
+# change the end time (to match the fixation end time of the longest trial)
+lastrow$CURRENT_FIX_END <- max(lastrow$CURRENT_FIX_END)
+# change the fixation duration
+lastrow$CURRENT_FIX_DURATION <- lastrow$CURRENT_FIX_END - lastrow$CURRENT_FIX_START
+# change the fixation location attributes (as if looking at center)
+lastrow$CURRENT_FIX_X <- 0
+lastrow$CURRENT_FIX_Y <- 0
+lastrow$FIXATED_CELL <- 13
+lastrow$FIXATED_LOCATION <- "CTR"
+lastrow$FIXATED_OBJECT <- "ctr"
+
+# combine the last rows back to the original dataset
+dat <- rbind(dat,lastrow)
+# sort data based on SUBJECT, TRIAL, and CURRENT_FIX_START
+dat <- dat[with(dat,order(SUBJECT,TRIAL,CURRENT_FIX_START)),]
+
+# CODE ITEM TYPE (SIMILAR vs DISTINCT PLACE OF ARTICULATION)
+### code filler trials as 0
+### code similar as 1, distinct as 2
+dat$POA_CODE <- ifelse(dat$COND == "Filler",0,
+                       ifelse(dat$TARGET %in% c("carp","harp","cat","road","knot","beak"),2,1))
+```
+
+```{r changed functions, echo=FALSE}
+# separate fixations at cross hair and those outside of any region of interest
+assignIA <- function(gaze) {
+	# create a column for each type of object
+	gaze$T <- gaze$FIXATED_OBJECT == "trg"
+	gaze$D <- gaze$FIXATED_OBJECT == "dis"
+	gaze$C <- gaze$FIXATED_OBJECT == "coh"
+	gaze$X <- gaze$FIXATED_OBJECT == "ctr"
+  gaze$O <- gaze$FIXATED_OBJECT == "other"
+  # gaze$O <- gaze$FIXATED_OBJECT %in% c("other","ctr")
+
+	return(gaze)
+}
+computeFixProp <- function(gazeBins, by="SUBJECT"){
+  #take binified raw data and convert to mean fixation proportions
+  #meanFix uses total number of trials (i.e., padding shorter trials with 0)
+  #meanFixBob uses number of ongoing trials, as done by Bob McMurray
+  #output also includes sumFix and N columns for using logistic regression
+  
+  #default to doing by subjects
+  
+  #melt the data frame into a "long" format
+#   gazeM<-melt(gazeBins, id=c("Time","SUBJECT","COND","TARGET","TRIAL"), 
+#               measure=c("T","D","C","X","O"), variable_name = "FIX_OBJECT", na.rm=T) 
+  gazeM <- melt(gazeBins, id = c("Time","SUBJECT","COND","TARGET","TRIAL"), 
+              measure = c("T","D","C","O","X"), variable_name = "FIX_OBJECT", na.rm = T)
+  #rename the value column and make it a number
+  gazeM$Fix <- as.numeric(gazeM$value) 
+  
+  if (by == "SUBJECT"){
+    #compute number of trials for each subject-by-condition combination
+    nTrials <- ddply(gazeBins,.(SUBJECT, COND), summarize, N = length(unique(TRIAL)))
+    #merge fixation and number-of-trials data
+    gazeM2 <- merge(gazeM,nTrials)
+    # double N for distractors
+    gazeM2$N[gazeM2$FIX_OBJECT == "D"] <- gazeM2$N[gazeM2$FIX_OBJECT == "D"]*2
+    #compute subject means over trials (SE calculation added by Monica)
+    gazeS <- ddply(gazeM2,.(SUBJECT, COND, FIX_OBJECT, Time), summarize,
+                 meanFix=sum(Fix)/unique(N), 
+                 seFix=sd(Fix)/sqrt(unique(N)), 
+                 sumFix=sum(Fix), 
+                 N=unique(N)) 
+  } else {#by items version
+    #compute number of trials for each target (condition is between-items)
+    nTrials <- ddply(gazeBins,.(TARGET, COND), summarize, N = length(unique(interaction(SUBJECT,TRIAL))))
+    #merge fixation and number-of-trials data
+    gazeM2 <- merge(gazeM,nTrials)
+    # double N for distractors
+    gazeM2$N[gazeM2$FIX_OBJECT == "D"] <- gazeM2$N[gazeM2$FIX_OBJECT == "D"]*2
+    #compute target means over trials (SE calculation added by Monica)
+    gazeS <- ddply(gazeM2,.(TARGET, COND, FIX_OBJECT, Time), summarize, 
+                 meanFix=sum(Fix)/unique(N), 
+                 seFix=sd(Fix)/sqrt(unique(N)), 
+                 sumFix=sum(Fix), 
+                 N=unique(N))
+  }
+  return(gazeS)
+}
+```
+
+```{r fix prop, echo=FALSE, fig.width=15, fig.height=10}
+gaze.IA <- assignIA(dat)
+gazeBins_2000 <- binifyFixations(gaze.IA, binSize=50, maxTime=2000,
+                                 keepCols = c("SUBJECT", "COND", "TARGET","TRIAL", 
+                                            "T", "C", "D", "X", "O", "POA_CODE"))
+
+gazeSubj <- computeFixProp(gazeBins_2000)
+gazeSubj.s <- subset(gazeSubj, (COND != "Filler" & Time >= 0))
+gazeSubj.s$FIX_OBJECT <- factor(gazeSubj.s$FIX_OBJECT, levels = c("T","C","D","X","O"))
+levels(gazeSubj.s$FIX_OBJECT) <- c("target","competitor","distractor","cross","other")
+
+# selecting subjects that have both eyetracking data and ID measures
+gazeSubj.s <- merge(gazeSubj.s, cat_idx, by.x = "SUBJECT", by.y = "subj", sort = T)
+# sort data frame
+gazeSubj.s <- gazeSubj.s[with(gazeSubj.s, order(SUBJECT, COND, FIX_OBJECT, Time)),]
+
+# reverse factor level order
+gazeSubj.s$groups.phono.3 = 
+  with(gazeSubj.s, factor(groups.phono.3, levels = rev(levels(groups.phono.3))))
+```
+
+## Fixation Proportions of All Objects
+```{r fix prop all objects, echo=FALSE, fig.width=10, fig.height=30}
+p_fixprop_objects <-
+  ggplot(subset(gazeSubj.s, Time <= 1500), aes(Time, meanFix, shape = COND)) + 
+  facet_grid(.~FIX_OBJECT) +
+  stat_summary(fun.data = mean_se, geom = "ribbon", alpha = .2, aes(fill = COND)) +
+  stat_summary(fun.y = mean, geom = "line", aes(linetype = COND, color = COND), size = 1) +
+  stat_summary(fun.y = mean, geom = "point", size = 4, fill = "white", aes(color = COND)) +
+  scale_shape_manual(values = c(17,15,22)) +
+  scale_linetype_manual(values = c("solid", "longdash", "dotted")) +
+  scale_fill_manual(values = c("blue", "red", "black")) +
+  scale_color_manual(values = c("blue", "red", "black")) +
+  coord_cartesian(ylim = c(0, 0.8)) + 
+  theme_bw() + 
+  theme(text  =  element_text(size = 40),
+        axis.text = element_text(size = 30),
+        axis.title = element_text(size = 40,face = "bold"),
+        axis.title.x = element_text(margin = margin(20,20,20,20)),
+        axis.title.y = element_text(margin = margin(20,20,20,20)),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.position = c(0.05,0.7), 
+        legend.direction = "vertical",
+        legend.title = element_text(size = 30),
+        legend.text = element_text(size = 30),
+        legend.key.size = unit(0.5, "inch"),
+        plot.margin = margin(10,10,10,10)) +
+  xlab("Time from Target Onset (ms)") +
+  ylab("Mean Fixation Proportion") +
+  guides(shape = guide_legend(title = "Condition"),
+         linetype = guide_legend(title = "Condition"),
+         fill = guide_legend(title = "Condition"),
+         color = guide_legend(title = "Condition"))
+```
+
+```{r fix prop all objects by group, echo=FALSE, fig.width=28, fig.height=30}
+p_fixprop_objects_groups <-
+  ggplot(subset(gazeSubj.s, Time <= 1500), aes(Time, meanFix, shape = COND)) + 
+  facet_grid(groups.phono.3~FIX_OBJECT) +
+  stat_summary(fun.data = mean_se, geom = "ribbon", alpha = .2, aes(fill = COND)) +
+  stat_summary(fun.y = mean, geom = "line", aes(linetype = COND, color = COND), size = 1) +
+  stat_summary(fun.y = mean, geom = "point", size = 4, fill = "white", aes(color = COND)) +
+  scale_shape_manual(values = c(17,15,22)) +
+  scale_linetype_manual(values = c("solid", "longdash", "dotted")) +
+  scale_fill_manual(values = c("blue", "red", "black")) +
+  scale_color_manual(values = c("blue", "red", "black")) +
+  coord_cartesian(ylim = c(0, 0.8)) + 
+  theme_bw() +
+  theme(text = element_text(size = 40),
+        axis.text = element_text(size = 30),
+        axis.title = element_text(size = 40,face = "bold"),
+        axis.title.x = element_text(margin = margin(20,20,20,20)),
+        axis.title.y = element_text(margin = margin(20,20,20,20)),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.position = c(0.05,0.9), 
+        legend.direction = "vertical",
+        legend.title = element_text(size = 30),
+        legend.text = element_text(size = 30),
+        legend.key.size = unit(0.5, "inch"),
+        plot.margin = margin(10,10,10,10)) +
+  xlab("Time from Target Onset (ms)") +
+  ylab("Mean Fixation Proportion") +
+  guides(shape = guide_legend(title = "Condition"),
+         linetype = guide_legend(title = "Condition"),
+         fill = guide_legend(title = "Condition"),
+         color = guide_legend(title = "Condition"))
+```
+
+```{r Figure 2 A & B, echo=FALSE, fig.height=30, fig.width=40}
+title.A <- textGrob(
+    label = "A",
+    x = unit(3, "lines"), 
+    y = unit(0, "lines"),
+    hjust = 0, vjust = 0,
+    gp = gpar(fontsize = 50))
+title.B <- textGrob(
+    label = "B",
+    x = unit(3, "lines"), 
+    y = unit(0, "lines"),
+    hjust = 0, vjust = 0,
+    gp = gpar(fontsize = 50))
+p1 <- arrangeGrob(p_fixprop_objects, top = title.A)
+p2 <- arrangeGrob(p_fixprop_objects_groups, top = title.B)
+grid.arrange(p1, p2, layout_matrix = cbind(c(1,1,2,2,2,2,2)))
+```
+
+## GCA on Target Fixation Proportions
+```{r GCA polynomial terms, echo=FALSE, fig.width=15, fig.height=5}
+data_600to1200 <- droplevels(subset(gazeSubj.s, Time >= 600 & Time <= 1200))
+# convert time into time bin (50 ms/bin)
+data_600to1200$timeBin <- data_600to1200$Time/50 - 11
+# add polynomial terms into the model
+t <- poly(unique(data_600to1200$timeBin), 4)
+data_600to1200[, paste("ot", 1:4, sep = "")] <- t[data_600to1200$timeBin, 1:4]
+data.trg.allCon <- droplevels(subset(data_600to1200, FIX_OBJECT == "target"))
+```
+
+### Model Comparison Between GCA with and without Phonological Skills as a Fixed Effect
+```{r GCA without and with phono skills, echo=FALSE}
+# N3W1 as baseline
+# rearrange level order for COND
+data.trg.allCon$COND <- factor(data.trg.allCon$COND, levels = c("N3W1","W1W1","W2W1"))
+
+m.allCon.wo.phono <- lmer(meanFix ~ (ot1+ot2+ot3)*(COND) +
+                                (ot1+ot2+ot3 | SUBJECT) +
+                                (ot1+ot2 | SUBJECT:COND),
+                      control = lmerControl(optimizer = "bobyqa"), 
+                      data = data.trg.allCon, REML = F)
+data.trg.allCon$fit.wo.phono <- fitted(m.allCon.wo.phono)
+
+m.allCon.wo.phono.coefs <- as.data.frame(coef(summary(m.allCon.wo.phono)))
+m.allCon.wo.phono.coefs$p <- 2 * (1 - pnorm(abs(m.allCon.wo.phono.coefs$"t value")))
+m.allCon.wo.phono.coefs$sig <- ifelse(m.allCon.wo.phono.coefs$p < 0.05,'*','n.s.')
+kable(m.allCon.wo.phono.coefs, digits = 3, format = "markdown")
+
+
+m.allCon.w.phono <- lmer(meanFix ~ (ot1+ot2+ot3)*(COND)*(phono.composite) +
+                                (ot1+ot2+ot3 | SUBJECT) +
+                                (ot1+ot2 | SUBJECT:COND),
+                      control = lmerControl(optimizer = "bobyqa"), 
+                      data = data.trg.allCon, REML = F)
+data.trg.allCon$fit.w.phono <- fitted(m.allCon.w.phono)
+
+m.allCon.w.phono.coefs <- as.data.frame(coef(summary(m.allCon.w.phono)))
+m.allCon.w.phono.coefs$p <- 2 * (1 - pnorm(abs(m.allCon.w.phono.coefs$"t value")))
+m.allCon.w.phono.coefs$sig <- ifelse(m.allCon.w.phono.coefs$p < 0.05,'*','n.s.')
+kable(m.allCon.w.phono.coefs, digits = 3, format = "markdown")
+
+# W1W1 as baseline
+# rearrange level order for COND
+data.trg.allCon$COND <- factor(data.trg.allCon$COND, levels = c("W1W1","W2W1","N3W1"))
+
+m.allCon.w.phono.w1w1 <- lmer(meanFix ~ (ot1+ot2+ot3)*(COND)*(phono.composite) +
+                                (ot1+ot2+ot3 | SUBJECT) +
+                                (ot1+ot2 | SUBJECT:COND),
+                      control = lmerControl(optimizer = "bobyqa"), 
+                      data = data.trg.allCon, REML = F)
+data.trg.allCon$fit.w.phono.w1w1 <- fitted(m.allCon.w.phono.w1w1)
+
+m.allCon.w.phono.w1w1.coefs <- as.data.frame(coef(summary(m.allCon.w.phono.w1w1)))
+m.allCon.w.phono.w1w1.coefs$p <- 2 * (1 - pnorm(abs(m.allCon.w.phono.w1w1.coefs$"t value")))
+m.allCon.w.phono.w1w1.coefs$sig <- ifelse(m.allCon.w.phono.w1w1.coefs$p < 0.05,'*','n.s.')
+kable(m.allCon.w.phono.w1w1.coefs, digits = 3, format = "markdown")
+```
+
+```{r GCA model comparison, echo=FALSE}
+kable(anova(m.allCon.wo.phono, m.allCon.w.phono), format = "markdown")
+```
+### GCA Visualization
+```{r GCA visualization, echo=FALSE, fig.width=10, fig.height=9}
+p_GCA <-
+ggplot(data.trg.allCon, aes(Time, meanFix, shape = COND)) +
+  stat_summary(aes(y = fit.w.phono, linetype = COND, color = COND), fun.y = mean, geom = "line") +
+  stat_summary(fun.y = mean, geom = "point", size = 4, fill = "white", aes(color = COND)) +
+  scale_shape_manual(values = c(17,15,22)) +
+  scale_linetype_manual(values = c("solid", "longdash", "dotted")) +
+  scale_fill_manual(values = c("blue", "red", "black")) +
+  scale_color_manual(values = c("blue", "red", "black")) +
+  coord_cartesian(ylim = c(0, 0.8)) + 
+  theme_bw() + 
+  theme(text = element_text(size = 40),
+        axis.text = element_text(size = 30),
+        axis.title = element_text(size = 30,face = "bold"),
+        axis.title.x = element_text(margin = margin(20,20,20,20)),
+        axis.title.y = element_text(margin = margin(20,20,20,20)),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.position = c(0.8,0.20), 
+        legend.direction = "vertical",
+        legend.title = element_text(size = 30),
+        legend.text = element_text(size = 30),
+        legend.key.size = unit(0.5, "inch"),
+        plot.margin = margin(10,10,10,10)) +
+  xlab("Time from Target Onset (ms)") +
+  ylab("Mean Fixation Proportion") +
+  guides(shape = guide_legend(title = ""),
+         linetype = guide_legend(title = ""),
+         fill = guide_legend(title = ""),
+         color = guide_legend(title = ""))
+```
+
+```{r GCA visualization by group, echo=FALSE, fig.width=28, fig.height=10}
+# levels(data.trg.allCon$groups.phono.3) <- c("low (0-33.33%), n = 18", "mid (33.33-66.67%), n = 22", "high (66.67-100%), n =21")
+p_GCA_groups <-
+ggplot(data.trg.allCon, aes(Time, meanFix, shape = COND)) +
+  facet_grid(groups.phono.3~.) +
+  stat_summary(aes(y = fit.w.phono, linetype = COND, color = COND), fun.y = mean, geom = "line") +
+  stat_summary(fun.y = mean, geom = "point", size = 4, fill = "white", aes(color = COND)) +
+  scale_shape_manual(values = c(17,15,22)) +
+  scale_linetype_manual(values = c("solid", "longdash", "dotted")) +
+  scale_fill_manual(values = c("blue", "red", "black")) +
+  scale_color_manual(values = c("blue", "red", "black")) +
+  coord_cartesian(ylim = c(0, 0.8)) + 
+  theme_bw() + 
+  theme(text = element_text(size = 40),
+        axis.text = element_text(size = 30),
+        axis.title = element_text(size = 30,face = "bold"),
+        axis.title.x = element_text(margin = margin(20,20,20,20)),
+        axis.title.y = element_text(margin = margin(20,20,20,20)),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.position = c(0.8,0.75),
+        legend.direction = "vertical",
+        legend.title = element_text(size = 30),
+        legend.text = element_text(size = 30),
+        legend.key.size = unit(0.5, "inch"),
+        plot.margin = margin(10,10,10,10)) +
+  xlab("Time from Target Onset (ms)") +
+  ylab("Mean Fixation Proportion") +
+  guides(shape = guide_legend(title = ""),
+         linetype = guide_legend(title = ""),
+         fill = guide_legend(title = ""),
+         color = guide_legend(title = ""))
+```
+
+```{r GCA visualization by COND, echo=FALSE, fig.width=9, fig.height=20}
+p_GCA_COND <-
+ggplot(data.trg.allCon, aes(Time, meanFix, shape = COND)) +
+  facet_grid(COND~.) +
+  stat_summary(aes(y = fit.w.phono, linetype = groups.phono.3, alpha = groups.phono.3, color = COND), fun.y = mean, geom = "line") +
+  stat_summary(fun.y = mean, geom = "point", size = 4, fill = "white", aes(color = COND, alpha = groups.phono.3)) +
+  scale_shape_manual(values = c(17,15,22)) +
+  scale_linetype_manual(values = c("solid", "longdash", "dotted")) +
+  scale_fill_manual(values = c("blue", "red", "black")) +
+  scale_color_manual(values = c("blue", "red", "black")) +
+  scale_alpha_discrete(range = c(1,0.5)) +
+  coord_cartesian(ylim = c(0, 0.8)) +
+  theme_bw() + 
+  theme(text = element_text(size = 40),
+        axis.text = element_text(size = 30),
+        axis.title = element_text(size = 40,face = "bold"),
+        axis.title.x = element_text(margin = margin(20,20,20,20)),
+        axis.title.y = element_text(margin = margin(20,20,20,20)),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.position = c(0.8,0.75), 
+        legend.direction = "vertical",
+        legend.title = element_text(size = 15),
+        legend.text = element_text(size = 15),
+        legend.key.size = unit(0.3, "inch"),
+        plot.margin = margin(10,10,10,10)) +
+  xlab("Time from Target Onset (ms)") +
+  ylab("Mean Fixation Proportion") +
+  guides(shape = guide_legend(title = "Condition"),
+         fill = guide_legend(title = "Condition"),
+         color = guide_legend(title = "Condition"),
+         linetype = guide_legend(title = "Group"),
+         alpha = guide_legend(title = "Group"))
+
+p_GCA_COND
+```
+
+## Model Fit for Condition Differences
+```{r conDiff, echo=FALSE}
+dat_conDiff <- ddply(gazeSubj.s, 
+                     .(SUBJECT, FIX_OBJECT, Time, groups.phono.3),
+                     summarize,
+                     conDiff = factor(c("W1W1-W2W1","W1W1-N3W1 (Phono)","N3W1-W2W1 (Lexical)"),
+                                      levels = c("W1W1-W2W1","W1W1-N3W1 (Phono)","N3W1-W2W1 (Lexical)")),
+                     # level order: W1W1, W2W1, N3W1
+                     diff_meanFix = c(meanFix[1] - meanFix[2],
+                                      meanFix[1] - meanFix[3],
+                                      meanFix[3] - meanFix[2]))
+
+dat_conDiff_trg <- droplevels(subset(dat_conDiff, 
+                                     FIX_OBJECT == "target" &
+                                     dat_conDiff$Time >= 600 & dat_conDiff$Time <= 1200))
+
+# convert time into time bin (50 ms/bin)
+dat_conDiff_trg$timeBin <- (dat_conDiff_trg$Time/50) - 11
+# add polynomial terms into the model
+t <- poly(unique(dat_conDiff_trg$timeBin), 4)
+dat_conDiff_trg[, paste("ot", 1:4, sep = "")] <- t[dat_conDiff_trg$timeBin, 1:4]
+
+# base model
+m.conDiff.base <- lmer(diff_meanFix ~ (ot1+ot2+ot3)*(conDiff) +
+                         (ot1+ot2+ot3 | SUBJECT) +
+                         (ot1+ot2 | SUBJECT:conDiff),
+                      control = lmerControl(optimizer = "bobyqa"), 
+                      data = dat_conDiff_trg, REML = F)
+                      ### REML tries to evaluate random effects AFTER fixed effects are explained
+dat_conDiff_trg$fit.base <- fitted(m.conDiff.base)
+```
+
+```{r conDiff visualization, fig.width=6, fig.height=15}
+p_GCA_conDiff <-
+ggplot(dat_conDiff_trg, aes(Time, diff_meanFix)) +
+  stat_summary(fun.y = mean, geom = "line",
+               aes(y = fit.base, linetype = conDiff, color = conDiff)) +
+  stat_summary(fun.y = mean, geom = "point", size = 4,
+               aes(color = conDiff)) +
+  scale_shape_manual(values = c(17,15,22)) +
+  scale_color_manual(values = c("gray", "skyblue", "hotpink")) +
+  scale_alpha_discrete(range = c(1,0.5)) +
+  coord_cartesian(ylim = c(-0.4, 0.6)) +
+  theme_bw() + 
+  theme(text = element_text(size = 40),
+        axis.text = element_text(size = 30),
+        axis.title = element_text(size = 30, face = "bold"),
+        axis.title.x = element_text(margin = margin(20,20,20,20)),
+        axis.title.y = element_text(margin = margin(20,20,20,20)),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.position = c(0.6,0.2), 
+        legend.direction = "vertical",
+        legend.title = element_text(size = 30),
+        legend.text = element_text(size = 30),
+        legend.key.size = unit(0.5, "inch"),
+        plot.margin = margin(10,10,10,10)) +
+  xlab("Time from Target Onset (ms)") +
+  ylab("Mean Fixation Proportion Difference") +
+  guides(color = guide_legend(title = ""),
+         linetype = guide_legend(title = ""))
+
+p_GCA_conDiff_groups <-
+ggplot(dat_conDiff_trg, aes(Time, diff_meanFix)) +
+  facet_grid(groups.phono.3~.) +
+  stat_summary(fun.y = mean, geom = "line",
+               aes(y = fit.base, linetype = conDiff, color = conDiff)) +
+  stat_summary(fun.y = mean, geom = "point", size = 4,
+               aes(color = conDiff)) +
+  scale_shape_manual(values = c(17,15,22)) +
+  scale_color_manual(values = c("gray", "skyblue", "hotpink")) +
+  scale_alpha_discrete(range = c(1,0.5)) +
+  coord_cartesian(ylim = c(-0.4, 0.6)) +
+  theme_bw() + 
+  theme(text = element_text(size = 40),
+        axis.text = element_text(size = 30),
+        axis.title = element_text(size = 30, face = "bold"),
+        axis.title.x = element_text(margin = margin(20,20,20,20)),
+        axis.title.y = element_text(margin = margin(20,20,20,20)),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.position = c(0.6,0.75), 
+        legend.direction = "vertical",
+        legend.title = element_text(size = 30),
+        legend.text = element_text(size = 30),
+        legend.key.size = unit(0.5, "inch"),
+        plot.margin = margin(10,10,10,10)) +
+  xlab("Time from Target Onset (ms)") +
+  ylab("Mean Fixation Proportion Difference") +
+  guides(color = guide_legend(title = ""),
+         linetype = guide_legend(title = ""))
+```
+
+```{r conDiff visualization by conDiff, fig.width=6, fig.height=10}
+p_GCA_conDiff_2 <-
+ggplot(subset(dat_conDiff_trg, conDiff != "W1W1-W2W1"), aes(Time, diff_meanFix)) +
+  facet_grid(conDiff~.) +
+  stat_summary(fun.y = mean, geom = "line",
+               aes(y = fit.base,
+                   linetype = groups.phono.3,
+                   alpha = groups.phono.3,
+                   color = conDiff)) +
+  stat_summary(fun.y = mean, geom = "point", size = 4,
+               aes(color = conDiff,
+                   alpha = groups.phono.3)) +
+  scale_color_manual(values = c("skyblue", "hotpink")) +
+  scale_fill_manual(values = c("skyblue", "hotpink")) +
+  scale_alpha_discrete(range = c(1,0.5)) +
+  coord_cartesian(ylim = c(-0.4, 0.6)) +
+  theme_bw() + 
+  theme(text = element_text(size = 20),
+        axis.text = element_text(size = 15),
+        axis.title = element_text(size = 20,face = "bold"),
+        axis.title.x = element_text(margin = margin(20,20,20,20)),
+        axis.title.y = element_text(margin = margin(20,20,20,20)),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.position = c(0.74,0.6), 
+        legend.direction = "vertical",
+        legend.title = element_text(size = 9),
+        legend.text = element_text(size = 9),
+        legend.key.size = unit(0.2, "inch"),
+        plot.margin = margin(10,10,10,10)) +
+  xlab("Time from Target Onset (ms)") +
+  ylab("Mean Fixation Proportion Difference") +
+  guides(color = FALSE,
+         fille = FALSE,
+         linetype = guide_legend(title = "Group"),
+         alpha = guide_legend(title = "Group"))
+
+p_GCA_conDiff_2
+```
+
+```{r Figure 3 A & B & C, echo=FALSE, fig.height=30, fig.width=20}
+title.A <- textGrob(
+    label = "A",
+    x = unit(1.5, "lines"), 
+    y = unit(0, "lines"),
+    hjust = 0, vjust = 0,
+    gp = gpar(fontsize = 50))
+title.B <- textGrob(
+    label = "B",
+    x = unit(1.5, "lines"), 
+    y = unit(0, "lines"),
+    hjust = 0, vjust = 0,
+    gp = gpar(fontsize = 50))
+title.C <- textGrob(
+    label = "C",
+    x = unit(1.5, "lines"), 
+    y = unit(0, "lines"),
+    hjust = 0, vjust = 0,
+    gp = gpar(fontsize = 50))
+title.D <- textGrob(
+    label = "D",
+    x = unit(1.5, "lines"), 
+    y = unit(0, "lines"),
+    hjust = 0, vjust = 0,
+    gp = gpar(fontsize = 50))
+
+p1 <- arrangeGrob(p_GCA, top = title.A)
+p2 <- arrangeGrob(p_GCA_groups, top = title.B)
+p3 <- arrangeGrob(p_GCA_conDiff, top = title.C)
+p4 <- arrangeGrob(p_GCA_conDiff_groups, top = title.D)
+grid.arrange(p1, p2, p3, p4,
+             layout_matrix = rbind(c(1, 3),
+                                   c(1, 3),
+                                   c(2, 4),
+                                   c(2, 4),
+                                   c(2, 4),
+                                   c(2, 4),
+                                   c(2, 4)))
+```
+
+## Correlation Between Composites and GCA Effect Sizes
+```{r cor composites & GCA effect sizes, echo=FALSE}
+# get effect sizes
+blup.allCon <- data.frame(colsplit(row.names(ranef(m.allCon.wo.phono)$`SUBJECT:COND`), 
+                                   ":", c("SUBJECT", "COND")), 
+                          ranef(m.allCon.wo.phono)$`SUBJECT:COND`)
+# ES.allCon <- ddply(blup.allCon, .(SUBJECT), summarize, 
+#                 W1W1_N3W1.Intercept = X.Intercept.[COND=="W1W1"] - X.Intercept.[COND=="N3W1"],
+#                 W2W1_N3W1.Intercept = X.Intercept.[COND=="W2W1"] - X.Intercept.[COND=="N3W1"])
+ES.allCon <- ddply(blup.allCon, .(SUBJECT), summarize, 
+                W1W1_N3W1.Intercept = X.Intercept.[COND == "W1W1"] - X.Intercept.[COND == "N3W1"],
+                N3W1_W2W1.Intercept = X.Intercept.[COND == "N3W1"] - X.Intercept.[COND == "W2W1"])
+
+
+# correlation matrix GCA effect sizes vs. composite scores
+ES_composites_cormtx <- data.frame(cor(cbind(ES.allCon[,c(2,3)], 
+                                             data_composite.st), method = "pearson"))
+ES_composites_cormtx <- sapply(ES_composites_cormtx, 
+                      function(val) { sub("^(-?)0.", "\\1.", sprintf("%.2f", val)) })
+ES_composites_cormtx[upper.tri(ES_composites_cormtx)] <- ''
+diag(ES_composites_cormtx) <- ''
+# write.csv(ES_composites_cormtx, "EffectSizes_Composites_correlation_matrix.csv")
+ES_composites_cormtx %>%
+  data.frame()
+```
+
+## Place of Articulation Similarity
+```{r fix prop by POA_CODE, echo=FALSE, fig.width=10, fig.height=19}
+# CALCULATE FIX PROP BY ITEM CODE
+gazeSubj.POA_SIM <- computeFixProp(subset(gazeBins_2000, POA_CODE == 1))
+gazeSubj.POA_SIM.s <- subset(gazeSubj.POA_SIM, ((FIX_OBJECT == "T" | FIX_OBJECT == "C") & 
+                                                  COND != "Filler" & Time >= 0))
+gazeSubj.POA_SIM.s$FIX_OBJECT <- factor(gazeSubj.POA_SIM.s$FIX_OBJECT, levels = c("T","C","D","X","O"))
+levels(gazeSubj.POA_SIM.s$FIX_OBJECT) <- c("target","competitor","distractor","cross","other")
+gazeSubj.POA_SIM.s$POA_CODE = "W1-N3-Similar"
+
+gazeSubj.POA_DIS <- computeFixProp(subset(gazeBins_2000, POA_CODE == 2))
+gazeSubj.POA_DIS.s <- subset(gazeSubj.POA_DIS, ((FIX_OBJECT == "T" | FIX_OBJECT == "C") & COND != "Filler" & Time >= 0))
+gazeSubj.POA_DIS.s$FIX_OBJECT <- factor(gazeSubj.POA_DIS.s$FIX_OBJECT, levels = c("T","C","D","X","O"))
+levels(gazeSubj.POA_DIS.s$FIX_OBJECT) <- c("target","competitor","distractor","cross","other")
+gazeSubj.POA_DIS.s$POA_CODE = "W1-N3-Dissimilar"
+
+gazeSubj.s2 <- rbind(gazeSubj.POA_SIM.s,gazeSubj.POA_DIS.s)
+gazeSubj.s2$POA_CODE <- factor(gazeSubj.s2$POA_CODE, levels = c("W1-N3-Similar","W1-N3-Dissimilar"))
+
+# selecting subjects that have both eyetracking data and ID measures
+gazeSubj.s2 <- merge(gazeSubj.s2, cat_idx, by.x = "SUBJECT", by.y = "subj", sort = T)
+# sort data frame
+gazeSubj.s2 <- gazeSubj.s2[with(gazeSubj.s2, order(SUBJECT, COND, FIX_OBJECT, Time)),]
+
+# reverse factor level order
+gazeSubj.s2$groups.phono.3 = 
+  with(gazeSubj.s2, factor(groups.phono.3, levels = rev(levels(groups.phono.3))))
+```
+
+```{r plot fix prop by POA_CODE and phono skills, echo=FALSE, fig.width=10, fig.height=19}
+p_POA <-
+ggplot(subset(gazeSubj.s2, 
+              FIX_OBJECT %in% c("target") & Time >= 600 & Time <= 1200), 
+       aes(Time, meanFix, shape = COND)) + 
+  facet_grid(.~POA_CODE) +
+  stat_summary(fun.data = mean_se, geom = "ribbon", alpha = .2, aes(fill = COND)) +
+  stat_summary(fun.y = mean, geom = "line", aes(linetype = COND, color = COND), size = 1) +
+  stat_summary(fun.y = mean, geom = "point", size = 4, fill = "white", aes(color = COND)) +
+  scale_shape_manual(values = c(17,15,22)) +
+  scale_linetype_manual(values = c("solid", "longdash", "dotted")) +
+  scale_fill_manual(values = c("blue", "red", "black")) +
+  scale_color_manual(values = c("blue", "red", "black")) +
+  coord_cartesian(ylim = c(0, 0.8)) + 
+  theme_bw() + 
+  theme(text = element_text(size = 40),
+        axis.text = element_text(size = 30),
+        axis.title = element_text(size = 40,face = "bold"),
+        axis.title.x = element_text(margin = margin(20,20,20,20)),
+        axis.title.y = element_text(margin = margin(20,20,20,20)),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.spacing.x = unit(2, "lines"),
+        legend.position = c(0.07,0.8), 
+        legend.direction = "vertical",
+        legend.title = element_text(size = 30),
+        legend.text = element_text(size = 30),
+        legend.key.size = unit(0.5, "inch"),
+        plot.margin = margin(10,10,10,10)) +
+  xlab("Time from Target Onset (ms)") +
+  ylab("Mean Fixation Proportion") +
+  guides(shape = guide_legend(title = "Condition"),
+         linetype = guide_legend(title = "Condition"),
+         fill = guide_legend(title = "Condition"),
+         color = guide_legend(title = "Condition"))
+```
+
+```{r plot fix prop by POA_CODE and phono skills by group, echo=FALSE, fig.width=28, fig.height=20}
+#levels(gazeSubj.s2$groups.phono.3) <- c("low (0-33.33%), n = 18", "mid (33.33-66.67%), n = 22", "high (66.67-100%), n =21")
+p_POA_groups <-
+ggplot(subset(gazeSubj.s2, FIX_OBJECT == "target" & Time >= 600 & Time <= 1200), 
+       aes(Time, meanFix, shape = COND)) + 
+  facet_grid(groups.phono.3~POA_CODE) +
+  stat_summary(fun.data = mean_se, geom = "ribbon", alpha = .2, aes(fill = COND)) +
+  stat_summary(fun.y = mean, geom = "line", aes(linetype = COND, color = COND), size = 1) +
+  stat_summary(fun.y = mean, geom = "point", size = 4, fill = "white", aes(color = COND)) +
+  scale_shape_manual(values = c(17,15,22)) +
+  scale_linetype_manual(values = c("solid", "longdash", "dotted")) +
+  scale_fill_manual(values = c("blue", "red", "black")) +
+  scale_color_manual(values = c("blue", "red", "black")) +
+  coord_cartesian(ylim = c(0, 0.8)) +
+  theme_bw() + 
+  theme(text = element_text(size = 40),
+        axis.text = element_text(size = 30),
+        axis.title = element_text(size = 40,face = "bold"),
+        axis.title.x = element_text(margin = margin(20,20,20,20)),
+        axis.title.y = element_text(margin = margin(20,20,20,20)),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.spacing.x = unit(2, "lines"),
+        legend.position = c(0.4,0.75), 
+        legend.direction = "vertical",
+        legend.title = element_text(size = 30),
+        legend.text = element_text(size = 30),
+        legend.key.size = unit(0.5, "inch"),
+        plot.margin = margin(10,10,10,10)) +
+  xlab("Time from Target Onset (ms)") +
+  ylab("Mean Fixation Proportion") +
+  guides(shape = guide_legend(title = "Condition"),
+         linetype = guide_legend(title = "Condition"),
+         fill = guide_legend(title = "Condition"),
+         color = guide_legend(title = "Condition"))
+```
+
+```{r Figure 4 A & B, echo=FALSE, fig.height=30, fig.width=18}
+title.A <- textGrob(
+    label = "A",
+    x = unit(1.5, "lines"), 
+    y = unit(0, "lines"),
+    hjust = 0, vjust = 0,
+    gp = gpar(fontsize = 50))
+title.B <- textGrob(
+    label = "B",
+    x = unit(1.5, "lines"), 
+    y = unit(0, "lines"),
+    hjust = 0, vjust = 0,
+    gp = gpar(fontsize = 50))
+p1 <- arrangeGrob(p_POA, top = title.A)
+p2 <- arrangeGrob(p_POA_groups, top = title.B)
+grid.arrange(p1, p2, layout_matrix = cbind(c(1,1,2,2,2,2,2)))
+```
+
+```{r plot fix prop by POA_CODE and phono skills by COND, echo=FALSE, fig.width=25, fig.height=30}
+ggplot(subset(gazeSubj.s2, FIX_OBJECT == "target" & Time >= 600 & Time <= 1200), 
+       aes(Time, meanFix, shape = COND)) + 
+  facet_grid(COND~POA_CODE) +
+  stat_summary(fun.data = mean_se, geom = "ribbon", alpha = .2, aes(fill = COND, linetype = groups.phono.3)) +
+  stat_summary(fun.y = mean, geom = "line", aes(linetype = groups.phono.3, alpha = groups.phono.3, color = COND), size = 1) +
+  stat_summary(fun.y = mean, geom = "point", size = 4, fill = "white", aes(alpha = groups.phono.3, color = COND)) +
+  scale_shape_manual(values = c(17,15,22)) +
+  scale_linetype_manual(values = c("solid", "longdash", "dotted")) +
+  scale_fill_manual(values = c("blue", "red", "black")) +
+  scale_color_manual(values = c("blue", "red", "black")) +
+  scale_alpha_discrete(range = c(1,0.5)) +
+  coord_cartesian(ylim = c(0, 0.8)) + 
+  theme_bw() + 
+  theme(text = element_text(size = 40),
+        axis.text = element_text(size = 30),
+        axis.title = element_text(size = 40,face = "bold"),
+        axis.title.x = element_text(margin = margin(20,20,20,20)),
+        axis.title.y = element_text(margin = margin(20,20,20,20)),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.position = c(0.4,0.75), 
+        legend.direction = "vertical",
+        legend.title = element_text(size = 30),
+        legend.text = element_text(size = 30),
+        legend.key.size = unit(0.5, "inch"),
+        plot.margin = margin(10,10,10,10)) +
+  xlab("Time from Target Onset (ms)") +
+  ylab("Mean Fixation Proportion") +
+  guides(shape = guide_legend(title = "Condition"),
+         fill = guide_legend(title = "Condition"),
+         color = guide_legend(title = "Condition"),
+         linetype = guide_legend(title = "Group"),
+         alpha = guide_legend(title = "Group"))
+```
+
+```{r fix prop by item and by POA_PAIR, include=FALSE, eval=FALSE}
+gazeItem <- computeFixProp(gazeBins_2000, by="ITEM")
+gazeItem.s <- subset(gazeItem, ((FIX_OBJECT=="T" | FIX_OBJECT=="C") & 
+                                  COND!="Filler" & Time>=0))
+gazeItem.s$FIX_OBJECT <- factor(gazeItem.s$FIX_OBJECT, levels=c("T","C","D","X","O"))
+levels(gazeItem.s$FIX_OBJECT) <- c("target","competitor","distractor","cross","other")
+
+gazeItem.s$POA_PAIR <- NA
+gazeItem.s[gazeItem.s$TARGET %in% c("tap"),]$POA_PAIR <- "LA"
+gazeItem.s[gazeItem.s$TARGET %in% c("net","bud","butt","fort","bat","pit","hood","rod"),]$POA_PAIR <- "AL"
+gazeItem.s[gazeItem.s$TARGET %in% c("carp","harp"),]$POA_PAIR <- "LV"
+gazeItem.s[gazeItem.s$TARGET %in% c("beak"),]$POA_PAIR <- "VL"
+gazeItem.s[gazeItem.s$TARGET %in% c("cat","road","knot"),]$POA_PAIR <- "AV"
+gazeItem.s$POA_PAIR <- factor(gazeItem.s$POA_PAIR, levels=c("LA","AL","LV","VL","AV"))
+
+gazeItem.s$POA_CODE <- NA
+gazeItem.s[gazeItem.s$TARGET %in% 
+             c("tap","net","bud",
+               "butt","fort","bat",
+               "pit","hood","rod"),]$POA_CODE <- "W1-N3-Similar"
+gazeItem.s[gazeItem.s$TARGET %in%
+             c("carp","harp","beak",
+               "cat","road","knot"),]$POA_CODE <- "W1-N3-Dissimilar"
+gazeItem.s$POA_CODE <- factor(gazeItem.s$POA_CODE, levels=c("W1-N3-Similar","W1-N3-Dissimilar"))
+
+gazeItem.s$`POA_CODE:TARGET` <- paste(gazeItem.s$POA_CODE,":",gazeItem.s$TARGET)
+gazeItem.s$`POA_CODE:TARGET` <- factor(gazeItem.s$`POA_CODE:TARGET`, 
+                                       levels = levels(factor(gazeItem.s$`POA_CODE:TARGET`))[c(7:15,1:6)])
+
+# plot by POA_PAIR
+# ggplot(subset(gazeItem.s, FIX_OBJECT=="target" & Time >= 600 & Time <= 1200), 
+#        aes(Time, meanFix, shape=COND)) + 
+#   facet_grid(POA_PAIR+TARGET~.) +
+#   stat_summary(fun.y=mean, geom="line", aes(color=COND)) +
+#   stat_summary(fun.y=mean, geom="point", aes(color=COND)) +
+#   stat_summary(fun.data=mean_se, geom="ribbon", alpha=.2, aes(fill=COND)) +
+#   scale_colour_manual(values=c("blue","red","black")) +
+#   scale_fill_manual(values=c("blue","red","black")) +
+#   scale_shape_manual(values=c(16,15,17))
+
+gazeItem.s$`FIX_OBJECT:COND` <- paste(gazeItem.s$FIX_OBJECT,':',gazeItem.s$COND)
+
+gazeItem.s$`FIX_OBJECT:COND` <- factor(gazeItem.s$`FIX_OBJECT:COND`, 
+                                       levels=c("target : W1W1",
+                                                "target : W2W1",
+                                                "target : N3W1",
+                                                "competitor : W1W1",
+                                                "competitor : W2W1",
+                                                "competitor : N3W1"))
+
+# plot by POA_CODE
+ggplot(subset(gazeItem.s, 
+              FIX_OBJECT %in% c("target","competitor") & Time >= 600 & Time <= 1200), 
+       aes(Time, meanFix, shape=`FIX_OBJECT:COND`, linetype=`FIX_OBJECT:COND`)) + 
+  facet_wrap(~`POA_CODE:TARGET`, ncol = 3) +
+  stat_summary(fun.y=mean, geom="line", aes(color=`FIX_OBJECT:COND`)) +
+  stat_summary(fun.y=mean, geom="point", aes(color=`FIX_OBJECT:COND`)) +
+  scale_colour_manual(values=c("blue","red","black","lightblue","lightpink","gray")) +
+  scale_shape_manual(values=c(16,15,17,16,15,17)) +
+  scale_linetype_manual(values=c(1,1,1,2,2,2)) +
+  theme_bw() +
+  coord_cartesian(ylim = c(0, 0.8))+
+  theme(text = element_text(size=16))+
+  xlab("Time from Target Onset (ms)") +
+  ylab("Mean Fixation Proportion") +
+  guides(color = guide_legend(title="Fixated Object : Condition"),
+         shape = guide_legend(title="Fixated Object : Condition"),
+         linetype = guide_legend(title="Fixated Object : Condition"))
+
+```
+
+```{r save image}
+save.image("Subcat_Results_Manuscript.RData")
+```

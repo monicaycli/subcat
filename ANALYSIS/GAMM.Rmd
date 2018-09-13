@@ -1,0 +1,679 @@
+---
+title: "GAMM"
+author: "Monica Li"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+output:
+  html_document:
+    theme: united
+    highlight: pygments
+    df_print: paged
+    pandoc_args:
+    - --output
+    - !expr paste0("GAMM-", format(Sys.time(), "%Y%m%d"), ".html")
+    toc: yes
+    toc_float: yes
+---
+
+```{r setup, include=FALSE, cache=FALSE}
+# change directory
+# setwd("~/Google-Drive/Projects/BRAZE/SUBCAT/3_ANALYSIS/")
+setwd("~/SUBCAT/3_ANALYSIS/")
+
+# knitr chunk settings
+knitr::opts_chunk$set(cache = TRUE,  cache.lazy = FALSE, cache.comments = FALSE,
+                      autodep = TRUE, echo = FALSE)
+knitr::dep_auto()
+
+# knitr format setting
+options(knitr.table.format = "html")
+
+# import functions
+library(Hmisc)
+library(MASS)
+library(car)
+library(knitr)
+library(ggplot2)
+library(reshape)
+library(plyr)
+library(grid)
+library(gridExtra)
+library(cluster)
+source("my.pairscor.R")
+source("et_tools_subcat.r")
+library(lme4)
+library(kableExtra)
+library(tidyr)
+library(magrittr)
+library(VWPre)
+library(mgcv)
+library(itsadug)
+```
+
+```{r env info, include=TRUE}
+devtools::session_info()
+SESSION_INFO <- devtools::session_info()
+```
+
+```{r import individual differences data, echo=FALSE, include=FALSE}
+# read in data
+kidlex_ids <- read.table("../2_DATA/kidlex_ids.txt",sep = "\t",header = T)
+
+# remove invalid data point(s)
+kidlex_ids$towre.nw.time[kidlex_ids$towre.nw.time > 45] <- NA
+
+# unfactor certain columns
+kidlex_ids$gort.fluen <- as.numeric(as.character(kidlex_ids$gort.fluen))
+kidlex_ids$gort.wpm   <- as.numeric(as.character(kidlex_ids$gort.wpm))
+kidlex_ids$gort.time  <- as.numeric(as.character(kidlex_ids$gort.time))
+
+# re-calculate some scores
+# items per minute
+kidlex_ids$towre.w.ipm <- with(kidlex_ids, (towre.w.acc/towre.w.time)*60)
+kidlex_ids$towre.nw.ipm <- with(kidlex_ids, (towre.nw.acc/towre.nw.time)*60)
+
+# set min values for print experience (authors and magazines) as 0
+kidlex_ids$art[kidlex_ids$art < 0] <- 0
+kidlex_ids$mrt[kidlex_ids$mrt < 0] <- 0
+
+# add Gates-MacGinitie grade equivalent scores
+ge.table <- read.csv("../2_DATA/Gates NCE Table new 2.csv",header = T)
+ge.table %<>% 
+  subset(select = c(Raw.Score, GE)) %>%
+  plyr::rename(c(Raw.Score = "gm.rcomp.raw", GE = "gm.rcomp.grade"))
+  
+row.names(ge.table) <- ge.table$gm.rcomp.raw
+kidlex_ids$gm.rcomp.grade <- ge.table$gm.rcomp.grade[kidlex_ids$gm.rcomp.raw]
+```
+
+```{r categorize ID measures, echo=FALSE, fig.width=7, fig.height=7}
+# including
+vrcomp <- c("gm.rcomp.raw","piat.r.raw","fr.raw","wj3.rcomp.raw")
+vlcomp <- c("piat.l.raw","wj3.oralcomp.raw")
+vvocab <- c("ppvt.raw","wasi.vocab.raw")
+vdecode <- c("towre.w.acc","wj3.wid.raw","towre.nw.acc","wj3.watt.raw")
+vfluen <- c("gort.fluen","wj3.rf.raw")
+vran <- c("ctopp.rcn","ctopp.rdn","ctopp.rln")
+vphono <- c("ctopp.blending","ctopp.elision","ctopp.dspan","ctopp.nwrep")
+vsspan <- c("sspan2.raw")
+vprint <- c("art","mrt")
+vgeneral <- c("wasi.matr.raw","corsi","wasi.iq")
+vdemo <- c("age.dec","edu.years","ses.2.status")
+vars <- c(vrcomp, vlcomp, vvocab, vdecode, vfluen, vran, vphono, vsspan, vprint, vgeneral, vdemo)
+vgrade <- c("gm.rcomp.grade","piat.r.grade","wj3.rcomp.grade",
+            "piat.l.grade","wj3.oralcomp.grade",
+            "wj3.wid.grade","wj3.watt.grade","wj3.rf.grade")
+```
+
+```{r descriptive stats of ID measures}
+# select measures of interest
+data_ids_w_grade <- kidlex_ids[c("subj", vars, vgrade)]
+
+# convert dataframe's row name into subject number
+row.names(data_ids_w_grade) <- factor(as.numeric(gsub("A108(.*)[A-z]{2}","\\1", data_ids_w_grade$subj)))
+
+# exclude subjects
+#134, 142, 148, 166: actually did not participate in Subcat
+#133: eyetracking data corrupted
+#175: did not complete significant portions of the ID tasks
+#126: influential data point based on QQ plot
+#146: not listed in the master subject list (ID measures)
+#138: 7 out of 15 critical trials were aborted
+data_ids_w_grade %<>%
+  subset(row.names(.) <= 200 & !row.names(.) %in% c(126,133,134,138,142,146,148,166,175))
+
+# ds_data_ids <- psych::describe(data_ids_w_grade)
+# ds_data_ids %>%
+#   kable()
+```
+
+```{r calculate box-cox lambda for ID measures, echo=FALSE}
+data <- data_ids_w_grade[c(vars)]
+
+bestLambda <- list()
+for (i in seq(ncol(data))) {
+  if (0 %in% data[[i]]) {
+    bc <- boxcox(lm(data[[i]]+mean(data[[i]])~1), plotit = F)
+  } else {
+    bc <- boxcox(lm(data[[i]]~1), plotit = F)
+  }
+  bestLambda <- cbind(bestLambda, bc$x[which.max(bc$y)])
+}
+
+t_bestLambda <- data.frame(ID = names(data), lambda = t(bestLambda))
+
+# kable(t_bestLambda, format="markdown")
+```
+
+```{r multiple imputation for missing data in ID measures, include=FALSE}
+# check to see missing data don't exceed 5%
+pMiss <- function(x){sum(is.na(x))/length(x)*100}
+apply(data,2,pMiss)
+apply(data,1,pMiss)
+
+# check missing data pattern
+library(mice)
+md.pattern(data)
+
+# run imputation
+tempData <- mice(data, m = 5, maxit = 50, meth = 'pmm', seed = 500)
+summary(tempData)
+
+# Replace missing values with the imputed values in the first of the five datasets.
+completedData <- complete(tempData,1)
+```
+
+```{r invert variables, include=FALSE}
+# make a copy of the imputated data
+# transform measures where higher scores indicate poorer performance by subtracting individual scores from their correspoding maximum observed scores
+data_trans <- completedData
+data_trans$ctopp.rcn <- max(data_trans$ctopp.rcn) - data_trans$ctopp.rcn
+data_trans$ctopp.rdn <- max(data_trans$ctopp.rdn) - data_trans$ctopp.rdn
+data_trans$ctopp.rln <- max(data_trans$ctopp.rln) - data_trans$ctopp.rln
+```
+
+```{r box-cox transformation and standardization, include=FALSE}
+# BOX-COX TRANSFORMATION & STANDARDIZATION
+data <- data_trans
+
+# find the best lambda for each variable
+bestLambda <- list()
+for (i in seq(ncol(data))) {
+  if (0 %in% data[[i]]) {
+    bc <- boxcox(lm(data[[i]]+mean(data[[i]])~1), plotit = F)
+  } else {
+    bc <- boxcox(lm(data[[i]]~1), plotit = F)
+  }
+  bestLambda <- cbind(bestLambda, bc$x[which.max(bc$y)])
+}
+
+# boxcox transformation
+data.bc <- data
+for (i in seq(ncol(data.bc))) {
+  if (0 %in% data.bc[[i]]) {
+    data.bc[[i]] <- data.bc[[i]] + mean(data.bc[[i]])
+  }
+  data.bc[[i]] <- bcPower(data.bc[[i]], bestLambda[[i]])
+}
+
+# standardization  
+data.bc.st <- apply(data.bc, 2, function(x) (x - mean(x))/sd(x))
+```
+
+```{r create and standardize composites}
+data_composite <- data.frame(matrix(ncol = 11, nrow = 60))
+colnames(data_composite) <- c("Reading Comprehension",
+                              "Oral Comprehension & Vocabulary",
+                              "Decoding",
+                              "Fluency",
+                              "RAN",
+                              "Phonological Skills",
+                              "Verbal Working Memory",
+                              "Print Experience",
+                              "Matrix Reasoning",
+                              "Visuospatial Memory",
+                              "IQ")
+# average variables
+data_composite$`Reading Comprehension`            <- rowMeans(data.bc.st[,vrcomp])
+data_composite$`Oral Comprehension & Vocabulary`  <- rowMeans(data.bc.st[,c(vlcomp,vvocab)])
+data_composite$Decoding                           <- rowMeans(data.bc.st[,vdecode])
+data_composite$Fluency                            <- rowMeans(data.bc.st[,vfluen])
+data_composite$RAN                                <- rowMeans(data.bc.st[,vran])
+data_composite$`Phonological Skills`              <- rowMeans(data.bc.st[,vphono])
+data_composite$`Verbal Working Memory`            <- data.bc.st[,vsspan]
+data_composite$`Print Experience`                 <- rowMeans(data.bc.st[,vprint])
+data_composite$`Matrix Reasoning`                 <- data.bc.st[,"wasi.matr.raw"]
+data_composite$`Visuospatial Memory`              <- data.bc.st[,"corsi"]
+data_composite$IQ                                 <- data.bc.st[,"wasi.iq"]
+
+# standardize composite scores
+data_composite.st <- data.frame(apply(data_composite, 2, function(x) (x - mean(x))/sd(x)))
+```
+
+```{r grouping participants into tertiles based on composite scores, echo=FALSE}
+cat_idx <- data.frame(subj = row.names(data), 
+                      phono.composite = data_composite.st$Phonological.Skills)
+
+cat_idx$groups.phono.3 <- cut(cat_idx$phono.composite, 
+                      breaks = quantile(cat_idx$phono.composite, probs = seq(0,1,1/3)),
+                      include.lowest = TRUE,
+                      right = FALSE)
+levels(cat_idx$groups.phono.3) <- c("low (0-33.33%)","mid (33.33-66.67%)","high (66.67-100%)")
+```
+
+```{r subcat trial abortion info}
+Acc <- read.csv("../2_DATA/trials.csv", header = T)
+
+Acc_rm <-
+  Acc %>%
+  mutate(., trialid = trialid + 1) %>%
+  mutate(., subj = (gsub("ec(.*)[A-z]{2}", "\\1", subj) %>% as.numeric %>% factor)) %>%
+  subset(!(subj %in% c("126","133","134","138","142","146","148","166","175")))
+```
+
+```{r load eyetracking data, echo=FALSE, include=FALSE}
+filepath <- "../2_DATA/subcat_n64_mirman_repairedROIs.2015.12.15.txt"
+dat <- readFixationReport(filepath, screenSize = c(1024,768))
+
+# change subject id format
+dat$SUBJECT <- factor(as.numeric(gsub("ec(.*)[A-z]{2}","\\1",dat$SUBJECT)))
+
+# merge accuracy info and eyetracking data, remove subjects, remove aborted trials
+dat <-
+  merge(dat, Acc_rm, by.x = c("SUBJECT","TRIAL"), by.y = c("subj","trialid")) %>%
+  subset(aborted == FALSE) %>%
+  droplevels
+
+# rearrange level order for COND
+dat$COND <- factor(dat$COND, levels = c("W1W1","W2W1","N3W1","Filler"))
+
+# CROSS PADDING
+# sort the dataframe by SUBJECT, TRIAL, and CURRENT_FIX_START
+dat <- dat[with(dat,order(SUBJECT,TRIAL,CURRENT_FIX_START)),]
+# extract the last row of each trial from each subject
+lastrow <- dat[!duplicated(dat[c("SUBJECT","TRIAL")],fromLast = TRUE),]
+# change the start time (to the end time of the last fixation point)
+lastrow$CURRENT_FIX_START <- lastrow$CURRENT_FIX_END
+# change the end time (to match the fixation end time of the longest trial)
+lastrow$CURRENT_FIX_END <- max(lastrow$CURRENT_FIX_END)
+# change the fixation duration
+lastrow$CURRENT_FIX_DURATION <- lastrow$CURRENT_FIX_END - lastrow$CURRENT_FIX_START
+# change the fixation location attributes (as if looking at center)
+lastrow$CURRENT_FIX_X <- 0
+lastrow$CURRENT_FIX_Y <- 0
+lastrow$FIXATED_CELL <- 13
+lastrow$FIXATED_LOCATION <- "CTR"
+lastrow$FIXATED_OBJECT <- "ctr"
+
+# combine the last rows back to the original dataset
+dat <- rbind(dat,lastrow)
+# sort data based on SUBJECT, TRIAL, and CURRENT_FIX_START
+dat <- dat[with(dat,order(SUBJECT,TRIAL,CURRENT_FIX_START)),]
+
+# CODE ITEM TYPE (SIMILAR vs DISTINCT PLACE OF ARTICULATION)
+### code filler trials as 0
+### code similar as 1, distinct as 2
+dat$POA_CODE <- ifelse(dat$COND == "Filler",0,
+                       ifelse(dat$TARGET %in% c("carp","harp","cat","road","knot","beak"),2,1))
+```
+
+```{r changed functions, echo=FALSE}
+# separate fixations at cross hair and those outside of any region of interest
+assignIA <- function(gaze) {
+	# create a column for each type of object
+	gaze$T <- gaze$FIXATED_OBJECT == "trg"
+	gaze$D <- gaze$FIXATED_OBJECT == "dis"
+	gaze$C <- gaze$FIXATED_OBJECT == "coh"
+	gaze$X <- gaze$FIXATED_OBJECT == "ctr"
+  gaze$O <- gaze$FIXATED_OBJECT == "other"
+  # gaze$O <- gaze$FIXATED_OBJECT %in% c("other","ctr")
+
+	return(gaze)
+}
+computeFixProp <- function(gazeBins, by="SUBJECT"){
+  #take binified raw data and convert to mean fixation proportions
+  #meanFix uses total number of trials (i.e., padding shorter trials with 0)
+  #meanFixBob uses number of ongoing trials, as done by Bob McMurray
+  #output also includes sumFix and N columns for using logistic regression
+  
+  #default to doing by subjects
+  
+  #melt the data frame into a "long" format
+#   gazeM<-melt(gazeBins, id=c("Time","SUBJECT","COND","TARGET","TRIAL"), 
+#               measure=c("T","D","C","X","O"), variable_name = "FIX_OBJECT", na.rm=T) 
+  gazeM <- melt(gazeBins, id = c("Time","SUBJECT","COND","TARGET","TRIAL"), 
+              measure = c("T","D","C","O","X"), variable_name = "FIX_OBJECT", na.rm = T)
+  #rename the value column and make it a number
+  gazeM$Fix <- as.numeric(gazeM$value) 
+  
+  if (by == "SUBJECT") {
+    #compute number of trials for each subject-by-condition combination
+    nTrials <- ddply(gazeBins,.(SUBJECT, COND), summarize, N = length(unique(TRIAL)))
+    #merge fixation and number-of-trials data
+    gazeM2 <- merge(gazeM,nTrials)
+    # double N for distractors
+    gazeM2$N[gazeM2$FIX_OBJECT == "D"] <- gazeM2$N[gazeM2$FIX_OBJECT == "D"]*2
+    #compute subject means over trials (SE calculation added by Monica)
+    gazeS <- ddply(gazeM2,.(SUBJECT, COND, FIX_OBJECT, Time), summarize, 
+                 meanFix=sum(Fix)/unique(N), 
+                 seFix=sd(Fix)/sqrt(unique(N)), 
+                 sumFix=sum(Fix), 
+                 N=unique(N)) 
+  } else {#by items version
+    #compute number of trials for each target (condition is between-items)
+    nTrials <- ddply(gazeBins,.(TARGET, COND), summarize, N = length(unique(interaction(SUBJECT,TRIAL))))
+    #merge fixation and number-of-trials data
+    gazeM2 <- merge(gazeM,nTrials)
+    # double N for distractors
+    gazeM2$N[gazeM2$FIX_OBJECT == "D"] <- gazeM2$N[gazeM2$FIX_OBJECT == "D"]*2
+    #compute target means over trials (SE calculation added by Monica)
+    gazeS <- ddply(gazeM2,.(TARGET, COND, FIX_OBJECT, Time), summarize, 
+                 meanFix=sum(Fix)/unique(N), 
+                 seFix=sd(Fix)/sqrt(unique(N)), 
+                 sumFix=sum(Fix), 
+                 N=unique(N))
+  }
+  return(gazeS)
+}
+```
+
+```{r fix prop, echo=FALSE, fig.width=15, fig.height=10}
+gaze.IA <- assignIA(dat)
+gazeBins_2000 <- binifyFixations(gaze.IA, binSize = 50, maxTime = 2000,
+                                 keepCols = c("SUBJECT", "COND", "TARGET","TRIAL", 
+                                            "T", "C", "D", "X", "O", "POA_CODE"))
+
+gazeSubj <- computeFixProp(gazeBins_2000)
+gazeSubj.s <- subset(gazeSubj, (COND != "Filler" & Time >= 0))
+gazeSubj.s$FIX_OBJECT <- factor(gazeSubj.s$FIX_OBJECT, levels = c("T","C","D","X","O"))
+levels(gazeSubj.s$FIX_OBJECT) <- c("target","competitor","distractor","cross","other")
+
+# selecting subjects that have both eyetracking data and ID measures
+gazeSubj.s <- merge(gazeSubj.s, cat_idx, by.x = "SUBJECT", by.y = "subj", sort = T)
+# sort data frame
+gazeSubj.s <- gazeSubj.s[with(gazeSubj.s, order(SUBJECT, COND, FIX_OBJECT, Time)),]
+
+# reverse factor level order
+gazeSubj.s$groups.phono.3 = 
+  with(gazeSubj.s, factor(groups.phono.3, levels = rev(levels(groups.phono.3))))
+```
+
+# GAMM on Target Fixation Proportions
+* everything up until model specification remains the same as in the old analysis pipeline (i.e., preprocessing individual difference measaures, creating composite scores, calculating fixation proportions for each object and time bin)
+    * phonological skills composite consists of `ctopp.blending`, `ctopp.elision`, `ctopp.dspan`, and `ctopp.nwrep`
+* eyetracking analysis
+    * time frame: 600 ~ 1200 ms after critical word onset
+    * object: target
+    * use functions from `VWPre` (preprocessing), `mgcv` (model fitting), `itsadug` (visualization)
+```{r select analysis time frame, echo=FALSE}
+data_600to1200 <- droplevels(subset(gazeSubj.s, Time >= 600 & Time <= 1200))
+data.trg.allCon <- droplevels(subset(data_600to1200, FIX_OBJECT == "target"))
+```
+
+## 1. Preprocessing
+* turn proportions into empirical logits
+* mark time series onset time
+* set the reference level for Condition and specify contrasts
+```{r GAMM preprocessing, echo=TRUE}
+# transform proportions to elogits (cf. VWPre::transform_to_elogit)
+elogit = function(proportion=proportion, observations=observations, constant=constant) {
+    return(log((proportion * observations + constant)/((1 - proportion) * observations + constant)))
+  }
+weight = function(proportion=proportion, observations=observations, constant=constant) {
+    return((1/(proportion * observations + constant)) + (1/((1 - proportion) * observations + constant)))
+}
+
+Constant = 0.5 # default
+ObsPerBin = 12.5 # samples per bin (250 Hz * 0.05 second)
+
+data.trg.allCon$elogit <- elogit(proportion = data.trg.allCon$meanFix,
+                                 observations = ObsPerBin,
+                                 constant = Constant)
+data.trg.allCon$weight <- weight(proportion = data.trg.allCon$meanFix,
+                                 observations = ObsPerBin,
+                                 constant = Constant)
+
+```
+
+```{r GAMM model prep, echo=TRUE}
+# attach start point of each unique time series to the data.frame
+# the first time bin of a time series is indicated as `TRUE`, otherwise `FALSE`
+data.trg.allCon.start_event <- start_event(data.trg.allCon, 
+                                           column = "Time", 
+                                           event = c("SUBJECT","COND","FIX_OBJECT"))
+
+# adjust factor levels: N3W1 < W2W1 < W1W1 (where N3W1 is the reference level)
+data.trg.allCon.start_event$OFCOND <- factor(data.trg.allCon.start_event$COND, 
+                                             levels = c("N3W1","W2W1","W1W1"))
+data.trg.allCon.start_event$OFCOND <- as.ordered(data.trg.allCon.start_event$OFCOND)
+contrasts(data.trg.allCon.start_event$OFCOND) <- 'contr.treatment'
+contrasts(data.trg.allCon.start_event$OFCOND)
+```
+
+## 2. Base Model
+* overall, there's a significant difference of intercept between W1W1 and N3W1 (t = 5.94, p < .001) but no between W2W1 and N3W1 (t = -1.21, p = .23)
+* the curves of W2W1 and W1W1 over time are both significantly different than that of N3W1 (F = 15.46 and F = 22.35, respectively)
+* random effects (interactions between Subject and Condition & between Subject and Time) are both significant, indicating strong effect of individual differences
+```{r GAMM base model, echo=TRUE, fig.show='hold', warning=FALSE}
+Sys.time()
+
+# base model (without correcting for autoregression)
+gamm.base <- bam(elogit ~ OFCOND
+                 + s(Time)
+                 + s(Time, by = OFCOND)
+                 + s(Time, SUBJECT, by = COND, bs = "fs", m = 1), # random smooths
+                 data = data.trg.allCon.start_event,
+                 method = "ML", # maximum likelihood estimation
+                 weights = 1/weight)
+
+Sys.time()
+
+# base model with AR1 correction
+gamm.base.AR1 <- bam(elogit ~ OFCOND
+                     + s(Time)
+                     + s(Time, by = OFCOND)
+                     + s(Time, SUBJECT, by = COND, bs = "fs", m = 1), # random smooths
+                     data = data.trg.allCon.start_event,
+                     method = "ML", # maximum likelihood estimation
+                     weights = 1/weight,
+                     AR.start = start.event, 
+                     rho = itsadug::start_value_rho(gamm.base))
+
+Sys.time()
+
+# bs="tp". These are low rank isotropic smoothers of any number of covariates.
+# By isotropic is meant that rotation of the covariate co-ordinate system will
+# not change the result of smoothing. By low rank is meant that they have far
+# fewer coefficients than there are data to smooth. They are reduced rank
+# versions of the thin plate splines and use the thin plate spline penalty. They
+# are the default smooth for s terms because there is a defined sense in which
+# they are the optimal smoother of any given basis dimension/rank (Wood, 2003).
+# Thin plate regression splines do not have ‘knots’ (at least not in any
+# conventional sense): a truncated eigen-decomposition is used to achieve the
+# rank reduction. See tprs for further details.
+# bs="ts" is as "tp" but with a modification to the smoothing penalty, so that
+# the null space is also penalized slightly and the whole term can therefore be
+# shrunk to zero.
+# bs="fs" Smooth factor interactions are often produced using by variables (see
+# gam.models), but a special smoother class (see factor.smooth.interaction) is
+# available for the case in which a smooth is required at each of a large number
+# of factor levels (for example a smooth for each patient in a study), and each
+# smooth should have the same smoothing parameter. The "fs" smoothers are set up
+# to be efficient when used with gamm, and have penalties on each null sapce
+# component (i.e. they are fully ‘random effects’).
+# bs="re". These are parametric terms penalized by a ridge penalty (i.e. the
+# identity matrix). When such a smooth has multiple arguments then it represents
+# the parametric interaction of these arguments, with the coefficients penalized
+# by a ridge penalty. The ridge penalty is equivalent to an assumption that the
+# coefficients are i.i.d. normal random effects. See
+# smooth.construct.re.smooth.spec.
+```
+
+```{r gamm.base.AR1 table}
+# model summary
+summary(gamm.base.AR1)
+
+gamm.base.AR1.summary <- summary(gamm.base.AR1)
+data.frame(gamm.base.AR1.summary$p.table)
+data.frame(gamm.base.AR1.summary$s.table)
+```
+
+### 2.1. Model Comparison (w/ and w/o AR1 Correction)
+* including AR1 correction improves model fit
+```{r model comparison gamm.base and gamm.base.AR1, echo=FALSE, fig.show='hold'}
+# model comparison between gamm.base and gamm.base.AR1
+itsadug::acf_resid(gamm.base, split_pred = c("SUBJECT"), main = "Base Model w/o AR1 Correction")
+itsadug::acf_resid(gamm.base.AR1, split_pred = c("SUBJECT"), main = "Base Model w/ AR1 Correction")
+gamm.base.compare <- itsadug::compareML(gamm.base, gamm.base.AR1)
+gamm.base.compare$table
+```
+
+## 3. Model w/ Phonological Skills Composite as a Fixed Effect
+* significant interactions between Phono and W1W1-N3W1 (F = 4.32, p = .04) and between Phono and W2W1-N3W1 (F = 4.29, p = .006)
+* no significant interaction between Time and Phono
+```{r GAMM models with phonological skills, echo=TRUE, fig.show='hold', warning=FALSE}
+Sys.time()
+
+gamm.phono <- bam(elogit ~ OFCOND
+                  # reference curves:
+                  + s(Time) + s(phono.composite) 
+                  # difference curves:
+                  + s(Time, by = OFCOND) + s(phono.composite, by = OFCOND) 
+                  # reference surface:
+                  + ti(Time, phono.composite)
+                  # difference surface:
+                  + ti(Time, phono.composite, by = OFCOND)
+                  # random effects:
+                  + s(Time, SUBJECT, by = COND, bs = "fs", m = 1),
+                  data = data.trg.allCon.start_event,
+                  method = "ML", # maximum likelihood estimation
+                  weights = 1/weight)
+
+Sys.time()
+
+gamm.phono.AR1 <- bam(elogit ~ OFCOND
+                      # reference curves:
+                      + s(Time) + s(phono.composite) 
+                      # difference curves:
+                      + s(Time, by = OFCOND) + s(phono.composite, by = OFCOND) 
+                      # reference surface:
+                      + ti(Time, phono.composite)
+                      # difference surface:
+                      + ti(Time, phono.composite, by = OFCOND)
+                      # random effects:
+                      + s(Time, SUBJECT, by = COND, bs = "fs", m = 1),
+                      data = data.trg.allCon.start_event,
+                      method = "ML", # maximum likelihood estimation
+                      weights = 1/weight,
+                      AR.start = start.event,
+                      rho = itsadug::start_value_rho(gamm.base))
+
+Sys.time()
+```
+
+```{r gamm.phono.AR1 table}
+# model summary
+summary(gamm.phono.AR1)
+
+gamm.phono.AR1.summary <- summary(gamm.phono.AR1)
+data.frame(gamm.phono.AR1.summary$p.table)
+data.frame(gamm.phono.AR1.summary$s.table)
+```
+
+### 3.1. Model Comparison (w/ and w/o Phono Skills as a Predictor)
+* including phono skills composite improves model fit
+```{r model comparison gamm.base.AR1 and gamm.phono.AR1, echo=TRUE}
+# model comparison between gamm.base.AR1 and gamm.phono.AR1
+gamm.base.phono.compare <- itsadug::compareML(gamm.base.AR1, gamm.phono.AR1)
+gamm.base.phono.compare$table
+```
+
+### 3.2. GAMM Visualization
+* W1W1-N3W1 increases as phonological skills composite increases (always positive since ranging from 0 to 1.1)
+* N3W1-W2W1 decreases as phonological composite increases (from positive to negative, especially towards the very low end of the phono composit scores)
+* Phono has no interaction with Time (as shown in the model summary)
+```{r visualize, echo=TRUE, fig.show='hold', results='hide'}
+# plot diff of COND as a function of phono and time
+par_default <- par()
+par(cex = 1.5, bg = NA)
+
+plot_diff2(gamm.phono, 
+           view = c("Time", "phono.composite"), 
+           comp = list(OFCOND = c("W1W1", "N3W1")),
+           zlim = c(-2.5,2.5), rm.ranef = TRUE, se = FALSE,
+           col = "black", nCol = 1000, labcex = 1.5,
+           color = c('#2c7bb6','#abd9e9','#ffffbf','#fdae61','#d7191c'),
+           main = "W1W1-N3W1 (Phono)")
+plot_diff2(gamm.phono, 
+           view = c("Time", "phono.composite"), 
+           comp = list(OFCOND = c("N3W1", "W2W1")),
+           zlim = c(-2.5,2.5), rm.ranef = TRUE, se = FALSE,
+           col = "black", nCol = 1000, labcex = 1.5, nlevels = 5,
+           color = c('#2c7bb6','#abd9e9','#ffffbf','#fdae61','#d7191c'),
+           main = "N3W1-W2W1 (Lexical)")
+
+par(cex = par_default$cex, bg = par_default$bg)
+
+# http://colorbrewer2.org/?type=diverging&scheme=RdYlBu&n=5
+```
+
+```{r visualize GAMM by COND, echo=TRUE, fig.show='hold', results='hide'}
+par_default <- par()
+par(cex = 1.5, bg = NA)
+
+fvisgam(gamm.phono, 
+        view = c("Time", "phono.composite"), 
+        cond = list(OFCOND = "W1W1"), 
+        zlim = c(-2.5,2.5), rm.ranef = TRUE,
+        contour.col = "black", nCol = 1000, labcex = 1.5,
+        color = c('#2c7bb6','#abd9e9','#ffffbf','#fdae61','#d7191c'),
+        main = "W1W1")
+fvisgam(gamm.phono, 
+        view = c("Time", "phono.composite"), 
+        cond = list(OFCOND = "N3W1"),
+        zlim = c(-2.5,2.5), rm.ranef = TRUE,
+        contour.col = "black", nCol = 1000, labcex = 1.5,
+        color = c('#2c7bb6','#abd9e9','#ffffbf','#fdae61','#d7191c'),
+        main = "N3W1")
+fvisgam(gamm.phono, 
+        view = c("Time", "phono.composite"), 
+        cond = list(OFCOND = "W2W1"),
+        zlim = c(-2.5,2.5), rm.ranef = TRUE,
+        contour.col = "black", nCol = 1000, labcex = 1.5,
+        color = c('#2c7bb6','#abd9e9','#ffffbf','#fdae61','#d7191c'),
+        main = "W2W1")
+
+par(cex = par_default$cex, bg = par_default$bg)
+
+# http://colorbrewer2.org/?type=diverging&scheme=RdYlBu&n=5
+```
+
+<!--
+  
+  ## 4. Correlations Between ID Measures and Subcat Performance
+  * with GAMM and when autocorrelation is accounted for, correlation between effect sizes and ID composites **decrease** (compared to GCA), including the phonological skills composite (but it remains the highest correlated ID composite)
+```{r GAMM base model random effect, echo=TRUE}
+# extract the random effect from the base model
+gamm.base.random <- get_random(gamm.base.AR1)
+names(gamm.base.random$`s(SUBJECT,OFCOND)`) <- levels(interaction(unique(data.trg.allCon.start_event$SUBJECT),
+                                                                  unique(data.trg.allCon.start_event$OFCOND)))
+gamm.base.random.df <- as.data.frame(gamm.base.random$`s(SUBJECT,OFCOND)`)
+names(gamm.base.random.df) <- "coefficient"
+gamm.base.random.df <- data.frame(colsplit(row.names(gamm.base.random.df), 
+                                           split = "\\.", c("SUBJECT", "COND")), 
+                                  gamm.base.random.df)
+
+# calculate effect sizes (differences between conditions) based on the random effect
+gamm.base.random.ES <- ddply(gamm.base.random.df, .(SUBJECT), summarize, 
+                             W1W1_N3W1 = coefficient[COND == "W1W1"] - coefficient[COND == "N3W1"],
+                             N3W1_W2W1 = coefficient[COND == "N3W1"] - coefficient[COND == "W2W1"])
+
+# correlation matrix between effect sizes and individual difference composite scores
+ES_composites_cormtx <- data.frame(cor(cbind(gamm.base.random.ES[,c(2,3)], 
+                                             data_composite.st), method = "pearson"))
+ES_composites_cormtx <- sapply(ES_composites_cormtx, 
+                               function(val) { sub("^(-?)0.", "\\1.", sprintf("%.2f", val)) })
+ES_composites_cormtx[upper.tri(ES_composites_cormtx)] <- ''
+diag(ES_composites_cormtx) <- ''
+# write.csv(ES_composites_cormtx, "EffectSizes_Composites_correlation_matrix_GAMM.csv")
+```
+
+```{r composites correlation matrix, cols.print=15}
+ES_comp_cormtx_df <- data.frame(ES_composites_cormtx)
+colnames(ES_comp_cormtx_df) <- c("W1W1-N3W1", "N3W1-W2W1", "rcomp",
+                                 "lcomp+vocab", "decode", "fluen",
+                                 "RAN", "phono", "verbWM", "print",
+                                 "matrix", "corsi", "iq")
+rownames(ES_comp_cormtx_df) <- c("W1W1-N3W1", "N3W1-W2W1", "rcomp",
+                                 "lcomp+vocab", "decode", "fluen",
+                                 "RAN", "phono", "verbWM", "print",
+                                 "matrix", "corsi", "iq")
+ES_comp_cormtx_df
+```
+* correlation between W1W1-N3W1 and Phono = `r ES_composites_cormtx[8,"W1W1_N3W1"]`
+* correlation between N3W1-W2W1 and Phono = `r ES_composites_cormtx[8,"N3W1_W2W1"]`
+
+-->
+
+```{r save image}
+save.image("GAMM.RData")
+```
