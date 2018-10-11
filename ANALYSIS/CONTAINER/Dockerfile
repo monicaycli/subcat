@@ -2,8 +2,6 @@ FROM rocker/verse:3.5.0
 
 USER rstudio
 
-RUN mkdir $HOME/SUBCAT
-
 COPY packages.R /tmp/packages.R
 
 RUN Rscript /tmp/packages.R
