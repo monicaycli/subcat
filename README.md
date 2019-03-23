@@ -1,8 +1,7 @@
 # README
 
 This repository contains data and analysis scripts as reported in the study of
-[**Individual Differences in Subphonemic Sensitivity and Phonological Skills**]
-(https://osf.io/6rd2u/)
+[**Individual Differences in Subphonemic Sensitivity and Phonological Skills**](https://osf.io/6rd2u/)
 
 ## Download the Repo
 
@@ -37,7 +36,8 @@ running the analysis scripts.
     monicaycli/subcat
     ```
 
-    * Note that you can replace `$(pwd)` with any local directory you would like to have access to from within the container
+    * Note that you can replace `$(pwd)` with any local directory you would
+      like to have access to from within the container
 
 1. Open the container's RStudio in a broswer:
 
@@ -45,7 +45,8 @@ running the analysis scripts.
 
     * When prompted, enter `rstudio` for both the username and password
 
-    * In the RStudio interface, navigate to the directory container the analysis scripts and run the scripts
+    * In the RStudio interface, navigate to the directory container the
+      analysis scripts and run the scripts
 
 1. To stop the container once you are done:
 
