@@ -64,3 +64,7 @@ running the analysis scripts.
     ```bash
     docker image rm monicaycli/subcat
     ```
+
+## Licenses
+* The data are released under the [CC-By Attribution 4.0 International License](./DATA/LICENSE)
+* The code in this repo is released under the [MIT License](./ANALYSIS/LICENSE)
