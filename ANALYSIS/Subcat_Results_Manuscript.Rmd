@@ -10,13 +10,12 @@ output:
 ---
 
 ```{r setup, include=FALSE}
-# change directory
-# setwd("~/Google-Drive/Projects/BRAZE/SUBCAT/3_ANALYSIS/")
-setwd("~/SUBCAT/3_ANALYSIS/")
-
 # knitr chunk settings
-knitr::opts_chunk$set(cache = TRUE,  cache.lazy = FALSE, cache.comments = FALSE,
-                      autodep = TRUE, echo = FALSE)
+knitr::opts_chunk$set(cache = TRUE,
+                      cache.lazy = FALSE,
+                      cache.comments = FALSE,
+                      autodep = TRUE,
+                      echo = FALSE)
 knitr::dep_auto()
 
 # knitr format setting
@@ -33,12 +32,17 @@ library(plyr)
 library(grid)
 library(gridExtra)
 library(cluster)
-source("my.pairscor.R")
-source("et_tools_subcat.r")
 library(lme4)
 library(kableExtra)
 library(tidyr)
 library(magrittr)
+library(mice)
+library(psych)
+
+library(fs)
+library(here)
+
+source(fs::path(here::here(), "ANALYSIS", "et_tools_subcat.r"))
 ```
 
 ```{r env info, include=TRUE}
@@ -48,32 +52,34 @@ devtools::session_info()
 # Inidividual Differences Data
 ```{r import individual differences data, echo=FALSE, include=FALSE}
 # read in data
-kidlex_ids <- read.table("../2_DATA/kidlex_ids.txt",sep = "\t",header = T)
+test_scores <- read.csv(fs::path(here::here(), "DATA", "TEST_SCORES", ext = "csv"), header = T)
 
 # remove invalid data point(s)
-kidlex_ids$towre.nw.time[kidlex_ids$towre.nw.time > 45] <- NA
+test_scores$towre.nw.time[test_scores$towre.nw.time > 45] <- NA
 
 # unfactor certain columns
-kidlex_ids$gort.fluen <- as.numeric(as.character(kidlex_ids$gort.fluen))
-kidlex_ids$gort.wpm   <- as.numeric(as.character(kidlex_ids$gort.wpm))
-kidlex_ids$gort.time  <- as.numeric(as.character(kidlex_ids$gort.time))
+test_scores$gort.fluen <- as.numeric(as.character(test_scores$gort.fluen))
+test_scores$gort.wpm   <- as.numeric(as.character(test_scores$gort.wpm))
+test_scores$gort.time  <- as.numeric(as.character(test_scores$gort.time))
 
 # re-calculate some scores
 # items per minute
-kidlex_ids$towre.w.ipm <- with(kidlex_ids, (towre.w.acc/towre.w.time)*60)
-kidlex_ids$towre.nw.ipm <- with(kidlex_ids, (towre.nw.acc/towre.nw.time)*60)
+test_scores$towre.w.ipm <- with(test_scores, (towre.w.acc/towre.w.time)*60)
+test_scores$towre.nw.ipm <- with(test_scores, (towre.nw.acc/towre.nw.time)*60)
 
 # set min values for print experience (authors and magazines) as 0
-kidlex_ids$art[kidlex_ids$art < 0] <- 0
-kidlex_ids$mrt[kidlex_ids$mrt < 0] <- 0
+test_scores$art[test_scores$art < 0] <- 0
+test_scores$mrt[test_scores$mrt < 0] <- 0
 
 # add Gates-MacGinitie grade equivalent scores
-ge.table <- read.csv("../2_DATA/Gates NCE Table new 2.csv",header = T)
-ge.table %<>% 
-  rename(c(Raw.Score = "gm.rcomp.raw", GE = "gm.rcomp.grade")) %>%
+gates.table <- read.csv(fs::path(here::here(), "DATA", "GATES_CONVERSION", ext = "csv"), header = T)
+gates.table %<>% 
+  plyr::rename(c(Raw.Score = "gm.rcomp.raw", GE = "gm.rcomp.grade")) %>%
   subset(select = c(gm.rcomp.raw, gm.rcomp.grade))
-row.names(ge.table) <- ge.table$gm.rcomp.raw
-kidlex_ids$gm.rcomp.grade <- ge.table$gm.rcomp.grade[kidlex_ids$gm.rcomp.raw]
+
+test_scores$gm.rcomp.grade <-
+  gates.table$gm.rcomp.grade[match(test_scores$gm.rcomp.raw,
+                                   gates.table$gm.rcomp.raw)]
 ```
 
 ```{r categorize ID measures, echo=FALSE, fig.width=7, fig.height=7}
@@ -98,30 +104,19 @@ vgrade <- c("gm.rcomp.grade","piat.r.grade","wj3.rcomp.grade",
 ## Descriptive Statistics of Individual Differences Measures
   * only subjects whose id number is less or equal to 200 participated in the Subcat eyetracking task
   * the following subjects are removed from analyses:
-    - **134, 142, 148, 166**: actually did not participate in Subcat
-    - **146**: not listed in the master subject list (ID measures)
-    - **133**: eyetracking data corrupted
-    - **175**: did not complete significant portions of the ID tasks
     - **126**: influential data point based on QQ plot
+    - **133**: eyetracking data corrupted
     - **138**: 7 out of 15 critical trials were aborted
+    - **175**: did not complete significant portions of the ID tasks
   * there are 60 subjects left after exclusion
   * based on the exclusion information above, there were 64 subjects who took part in Subcat
 ```{r descriptive stats of ID measures, cols.print=15}
 # select measures of interest
-data_ids_w_grade <- kidlex_ids[c("subj", vars, vgrade)]
-
-# convert dataframe's row name into subject number
-row.names(data_ids_w_grade) <- factor(as.numeric(gsub("A108(.*)[A-z]{2}","\\1", data_ids_w_grade$subj)))
+data_ids_w_grade <- test_scores[c("subj", vars, vgrade)]
 
 # exclude subjects
-#134, 142, 148, 166: actually did not participate in Subcat
-#133: eyetracking data corrupted
-#175: did not complete significant portions of the ID tasks
-#126: influential data point based on QQ plot
-#146: not listed in the master subject list (ID measures)
-#138: 7 out of 15 critical trials were aborted
 data_ids_w_grade %<>%
-  subset(row.names(.) <= 200 & !row.names(.) %in% c(126,133,134,138,142,146,148,166,175))
+  subset(!(subj %in% c(126, 133, 138, 175)))
 
 ds_data_ids <- psych::describe(data_ids_w_grade)
 as.data.frame(ds_data_ids)
@@ -131,14 +126,14 @@ as.data.frame(ds_data_ids)
   * values of \(\lambda\): default (-2, 2) in steps of 0.1
   * \(\lambda\) values based on original data will be included in the descriptive table
 ```{r calculate box-cox lambda for ID measures, echo=FALSE}
-data <- data_ids_w_grade[c(vars)]
+data <- data_ids_w_grade[c("subj", vars)]
 
 bestLambda <- list()
 for (i in seq(ncol(data))) {
   if (0 %in% data[[i]]) {
-    bc <- boxcox(lm(data[[i]]+mean(data[[i]])~1), plotit = F)
+    bc <- MASS::boxcox(lm(data[[i]]+mean(data[[i]])~1), plotit = F)
   } else {
-    bc <- boxcox(lm(data[[i]]~1), plotit = F)
+    bc <- MASS::boxcox(lm(data[[i]]~1), plotit = F)
   }
   bestLambda <- cbind(bestLambda, bc$x[which.max(bc$y)])
 }
@@ -157,19 +152,19 @@ kable(t_bestLambda, format = "markdown")
 ```{r multiple imputation for missing data in ID measures, include=FALSE}
 # check to see missing data don't exceed 5%
 pMiss <- function(x){sum(is.na(x))/length(x)*100}
-apply(data,2,pMiss)
-apply(data,1,pMiss)
+apply(data, 2, pMiss)
+apply(data, 1, pMiss)
 
 # check missing data pattern
-library(mice)
-md.pattern(data)
+mice::md.pattern(data, plot = FALSE)
 
 # run imputation
-tempData <- mice(data,m = 5,maxit = 50,meth = 'pmm',seed = 500)
+tempData <- mice::mice(data, m = 5, maxit = 50, method = 'pmm', seed = 500,
+                       printFlag = FALSE)
 summary(tempData)
 
 # Replace missing values with the imputed values in the first of the five datasets.
-completedData <- complete(tempData,1)
+completedData <- mice::complete(tempData, 1)
 ```
 
 ```{r invert variables, include=FALSE}
@@ -189,9 +184,9 @@ data <- data_trans
 bestLambda <- list()
 for (i in seq(ncol(data))) {
   if (0 %in% data[[i]]) {
-    bc <- boxcox(lm(data[[i]]+mean(data[[i]])~1), plotit = F)
+    bc <- MASS::boxcox(lm(data[[i]]+mean(data[[i]])~1), plotit = F)
   } else {
-    bc <- boxcox(lm(data[[i]]~1), plotit = F)
+    bc <- MASS::boxcox(lm(data[[i]]~1), plotit = F)
   }
   bestLambda <- cbind(bestLambda, bc$x[which.max(bc$y)])
 }
@@ -202,7 +197,7 @@ for (i in seq(ncol(data.bc))) {
   if (0 %in% data.bc[[i]]) {
     data.bc[[i]] <- data.bc[[i]] + mean(data.bc[[i]])
   }
-  data.bc[[i]] <- bcPower(data.bc[[i]], bestLambda[[i]])
+  data.bc[[i]] <- car::bcPower(data.bc[[i]], bestLambda[[i]])
 }
 
 # standardization  
@@ -217,7 +212,6 @@ data_cormtx <- sapply(data_cormtx,
                       function(val) { sub("^(-?)0.", "\\1.", sprintf("%.2f", val)) })
 data_cormtx[upper.tri(data_cormtx)] <- ''
 diag(data_cormtx) <- ''
-# write.csv(data_cormtx, "correlation_matrix_r.csv")
 data.frame(data_cormtx)
 ```
 
@@ -248,9 +242,14 @@ data_composite$`Print Experience`                 <- rowMeans(data.bc.st[,vprint
 data_composite$`Matrix Reasoning`                 <- data.bc.st[,"wasi.matr.raw"]
 data_composite$`Visuospatial Memory`              <- data.bc.st[,"corsi"]
 data_composite$IQ                                 <- data.bc.st[,"wasi.iq"]
-
+data_composite$decode_w <- rowMeans(data.bc.st[,c("towre.w.acc", "wj3.wid.raw")])
+data_composite$decode_nw <- rowMeans(data.bc.st[,c("towre.nw.acc", "wj3.watt.raw")])
+  
 # standardize composite scores
 data_composite.st <- data.frame(apply(data_composite, 2, function(x) (x - mean(x))/sd(x)))
+
+# add subject number
+data_composite.st$subj <- data_trans$subj
 ```
 
 ### Pearson correlation
@@ -261,20 +260,18 @@ data_composite.st_cormtx <- sapply(data_composite.st_cormtx,
                       function(val) { sub("^(-?)0.", "\\1.", sprintf("%.2f", val)) })
 data_composite.st_cormtx[upper.tri(data_composite.st_cormtx)] <- ""
 diag(data_composite.st_cormtx) <- ""
-# write.csv(data_composite.st_cormtx, "composite_correlation_matrix_pearson.csv")
 data.frame(data_composite.st_cormtx)
 ```
 
 ### Spearman correlation
 ```{r spearman correlation matrix for composites}
 # correlation matrix for the composite scores (spearman rank order)
-rank_cor <- rcorr(as.matrix(data_composite.st), type = "spearman")
+rank_cor <- Hmisc::rcorr(as.matrix(data_composite.st), type = "spearman")
 rank_cor_mat <- data.frame(rank_cor$r)
 rank_cor_mat <- sapply(rank_cor_mat,
                       function(val) { sub("^(-?)0.", "\\1.", sprintf("%.2f", val)) })
 rank_cor_mat[upper.tri(rank_cor_mat)] <- ""
 diag(rank_cor_mat) <- ""
-# write.csv(rank_cor_mat, "composite_correlation_matrix_spearman.csv")
 data.frame(rank_cor_mat)
 ```
 
@@ -282,47 +279,51 @@ data.frame(rank_cor_mat)
 ## Fixation Proportion by Groups
   * based on phonological skills composite
 ```{r grouping participants into tertiles based on composite scores, echo=FALSE}
-cat_idx <- data.frame(subj = row.names(data), 
+cat_idx <- data.frame(subj = data$subj, 
                       phono.composite = data_composite.st$Phonological.Skills)
 
 cat_idx$groups.phono.3 <- cut(cat_idx$phono.composite, 
-                      breaks = quantile(cat_idx$phono.composite, probs = seq(0,1,1/3)),
+                      breaks = quantile(cat_idx$phono.composite,
+                                        probs = seq(0, 1, 1/3)),
                       include.lowest = TRUE,
                       right = FALSE)
 levels(cat_idx$groups.phono.3) <- c("low (0-33.33%)","mid (33.33-66.67%)","high (66.67-100%)")
 ```
 
-## Trial abortion information
-  * a trial would be aborted by the experimenter if one of the following steps was not correctly executed:
+## Trial termination information
+  * a trial would be terminated by the experimenter if one of the following steps was not correctly executed:
       1. move and hover mouse cursor on the image specified in the first instruction (e.g., "point to the saw")
       2. click on the target following the second (**critical**) instruction (e.g., "now the beak...")
       3. drag target picture to a location specified in the second instruction
   * the experimental script was written in a way that only the correct target could be picked up, and the trial will only end if all of the three steps above were carried out correctly
 ```{r subcat trial abortion info}
-Acc <- read.csv("../2_DATA/trials.csv", header = T)
+Acc <- read.csv(fs::path(here::here(), "DATA", "TRIAL_INFO", ext = "csv"), header = T)
 
 Acc_rm <-
   Acc %>%
-  mutate(., trialid = trialid + 1) %>%
-  mutate(., subj = (gsub("ec(.*)[A-z]{2}", "\\1", subj) %>% as.numeric %>% factor)) %>%
-  subset(!(subj %in% c("126","133","134","138","142","146","148","166","175")))
+  dplyr::mutate(., trialid = trialid + 1) %>%
+  dplyr::mutate(., subj = (subj %>% factor)) %>%
+  subset(!(subj %in% c("126", "133", "138", "175"))) %>%
+  droplevels()
 ```
 
 ```{r load eyetracking data, echo=FALSE, include=FALSE}
-filepath <- "../2_DATA/subcat_n64_mirman_repairedROIs.2015.12.15.txt"
-dat <- readFixationReport(filepath, screenSize = c(1024,768))
+filepath <- fs::path(here::here(), "DATA", "SUBCAT_ET_DATA", ext = "csv")
+dat <- readFixationReport(filepath, sep = ',', screenSize = c(1024,768))
 
 # change subject id format
-dat$SUBJECT <- factor(as.numeric(gsub("ec(.*)[A-z]{2}","\\1",dat$SUBJECT)))
+dat$SUBJECT <- factor(dat$SUBJECT)
 
 # merge accuracy info and eyetracking data, remove subjects, remove aborted trials
 dat <-
-  merge(dat, Acc_rm, by.x = c("SUBJECT","TRIAL"), by.y = c("subj","trialid")) %>%
+  merge(dat, Acc_rm,
+        by.x = c("SUBJECT","TRIAL"),
+        by.y = c("subj","trialid")) %>%
   subset(aborted == FALSE) %>%
-  droplevels
+  droplevels()
 
 # rearrange level order for COND
-dat$COND <- factor(dat$COND, levels = c("W1W1","W2W1","N3W1","Filler"))
+dat$COND <- factor(dat$COND, levels = c("W1W1", "W2W1", "N3W1", "Filler"))
 
 # CROSS PADDING
 # sort the dataframe by SUBJECT, TRIAL, and CURRENT_FIX_START
@@ -354,69 +355,9 @@ dat$POA_CODE <- ifelse(dat$COND == "Filler",0,
                        ifelse(dat$TARGET %in% c("carp","harp","cat","road","knot","beak"),2,1))
 ```
 
-```{r changed functions, echo=FALSE}
-# separate fixations at cross hair and those outside of any region of interest
-assignIA <- function(gaze) {
-	# create a column for each type of object
-	gaze$T <- gaze$FIXATED_OBJECT == "trg"
-	gaze$D <- gaze$FIXATED_OBJECT == "dis"
-	gaze$C <- gaze$FIXATED_OBJECT == "coh"
-	gaze$X <- gaze$FIXATED_OBJECT == "ctr"
-  gaze$O <- gaze$FIXATED_OBJECT == "other"
-  # gaze$O <- gaze$FIXATED_OBJECT %in% c("other","ctr")
-
-	return(gaze)
-}
-computeFixProp <- function(gazeBins, by="SUBJECT"){
-  #take binified raw data and convert to mean fixation proportions
-  #meanFix uses total number of trials (i.e., padding shorter trials with 0)
-  #meanFixBob uses number of ongoing trials, as done by Bob McMurray
-  #output also includes sumFix and N columns for using logistic regression
-  
-  #default to doing by subjects
-  
-  #melt the data frame into a "long" format
-#   gazeM<-melt(gazeBins, id=c("Time","SUBJECT","COND","TARGET","TRIAL"), 
-#               measure=c("T","D","C","X","O"), variable_name = "FIX_OBJECT", na.rm=T) 
-  gazeM <- melt(gazeBins, id = c("Time","SUBJECT","COND","TARGET","TRIAL"), 
-              measure = c("T","D","C","O","X"), variable_name = "FIX_OBJECT", na.rm = T)
-  #rename the value column and make it a number
-  gazeM$Fix <- as.numeric(gazeM$value) 
-  
-  if (by == "SUBJECT"){
-    #compute number of trials for each subject-by-condition combination
-    nTrials <- ddply(gazeBins,.(SUBJECT, COND), summarize, N = length(unique(TRIAL)))
-    #merge fixation and number-of-trials data
-    gazeM2 <- merge(gazeM,nTrials)
-    # double N for distractors
-    gazeM2$N[gazeM2$FIX_OBJECT == "D"] <- gazeM2$N[gazeM2$FIX_OBJECT == "D"]*2
-    #compute subject means over trials (SE calculation added by Monica)
-    gazeS <- ddply(gazeM2,.(SUBJECT, COND, FIX_OBJECT, Time), summarize,
-                 meanFix=sum(Fix)/unique(N), 
-                 seFix=sd(Fix)/sqrt(unique(N)), 
-                 sumFix=sum(Fix), 
-                 N=unique(N)) 
-  } else {#by items version
-    #compute number of trials for each target (condition is between-items)
-    nTrials <- ddply(gazeBins,.(TARGET, COND), summarize, N = length(unique(interaction(SUBJECT,TRIAL))))
-    #merge fixation and number-of-trials data
-    gazeM2 <- merge(gazeM,nTrials)
-    # double N for distractors
-    gazeM2$N[gazeM2$FIX_OBJECT == "D"] <- gazeM2$N[gazeM2$FIX_OBJECT == "D"]*2
-    #compute target means over trials (SE calculation added by Monica)
-    gazeS <- ddply(gazeM2,.(TARGET, COND, FIX_OBJECT, Time), summarize, 
-                 meanFix=sum(Fix)/unique(N), 
-                 seFix=sd(Fix)/sqrt(unique(N)), 
-                 sumFix=sum(Fix), 
-                 N=unique(N))
-  }
-  return(gazeS)
-}
-```
-
 ```{r fix prop, echo=FALSE, fig.width=15, fig.height=10}
 gaze.IA <- assignIA(dat)
-gazeBins_2000 <- binifyFixations(gaze.IA, binSize=50, maxTime=2000,
+gazeBins_2000 <- binifyFixations(gaze.IA, binSize = 50, maxTime = 2000,
                                  keepCols = c("SUBJECT", "COND", "TARGET","TRIAL", 
                                             "T", "C", "D", "X", "O", "POA_CODE"))
 
@@ -425,13 +366,13 @@ gazeSubj.s <- subset(gazeSubj, (COND != "Filler" & Time >= 0))
 gazeSubj.s$FIX_OBJECT <- factor(gazeSubj.s$FIX_OBJECT, levels = c("T","C","D","X","O"))
 levels(gazeSubj.s$FIX_OBJECT) <- c("target","competitor","distractor","cross","other")
 
-# selecting subjects that have both eyetracking data and ID measures
+# add subject grouping to the eyetracking data.frame
 gazeSubj.s <- merge(gazeSubj.s, cat_idx, by.x = "SUBJECT", by.y = "subj", sort = T)
 # sort data frame
 gazeSubj.s <- gazeSubj.s[with(gazeSubj.s, order(SUBJECT, COND, FIX_OBJECT, Time)),]
 
 # reverse factor level order
-gazeSubj.s$groups.phono.3 = 
+gazeSubj.s$groups.phono.3 <- 
   with(gazeSubj.s, factor(groups.phono.3, levels = rev(levels(groups.phono.3))))
 ```
 
@@ -584,6 +525,89 @@ kable(m.allCon.w.phono.w1w1.coefs, digits = 3, format = "markdown")
 ```{r GCA model comparison, echo=FALSE}
 kable(anova(m.allCon.wo.phono, m.allCon.w.phono), format = "markdown")
 ```
+
+### Models with Additional ID Composites
+```{r GCA with oral comp & decoding, echo=FALSE}
+# add composites to data frame
+data.trg.allCon <- merge(data.trg.allCon, data_composite.st, by.x = "SUBJECT", by.y = "subj")
+
+# N3W1 as baseline
+# rearrange level order for COND
+data.trg.allCon$COND <- factor(data.trg.allCon$COND, levels = c("N3W1","W1W1","W2W1"))
+
+# phonological skills (P) only
+m.P <- lmer(meanFix ~ (ot1+ot2+ot3)*(COND)*(Phonological.Skills) +
+              (ot1+ot2+ot3 | SUBJECT) +
+              (ot1+ot2 | SUBJECT:COND),
+            control = lmerControl(optimizer = "bobyqa"), 
+            data = data.trg.allCon, REML = F)
+
+# oral comprehension & vocab (O) only
+m.O <- lmer(meanFix ~ (ot1+ot2+ot3)*(COND)*(Oral.Comprehension...Vocabulary) +
+              (ot1+ot2+ot3 | SUBJECT) +
+              (ot1+ot2 | SUBJECT:COND),
+            control = lmerControl(optimizer = "bobyqa"), 
+            data = data.trg.allCon, REML = F)
+
+# decoding (D) only
+m.D <- lmer(meanFix ~ (ot1+ot2+ot3)*(COND)*(Decoding) +
+              (ot1+ot2+ot3 | SUBJECT) +
+              (ot1+ot2 | SUBJECT:COND),
+            control = lmerControl(optimizer = "bobyqa"), 
+            data = data.trg.allCon, REML = F)
+
+# P + O
+m.PO <- lmer(meanFix ~ (ot1+ot2+ot3)*(COND)*(Phonological.Skills + Oral.Comprehension...Vocabulary) +
+              (ot1+ot2+ot3 | SUBJECT) +
+              (ot1+ot2 | SUBJECT:COND),
+            control = lmerControl(optimizer = "bobyqa"), 
+            data = data.trg.allCon, REML = F)
+
+# P + D
+m.PD <- lmer(meanFix ~ (ot1+ot2+ot3)*(COND)*(Phonological.Skills + Decoding) +
+              (ot1+ot2+ot3 | SUBJECT) +
+              (ot1+ot2 | SUBJECT:COND),
+            control = lmerControl(optimizer = "bobyqa"), 
+            data = data.trg.allCon, REML = F)
+
+# O + P
+m.OP <- lmer(meanFix ~ (ot1+ot2+ot3)*(COND)*(Oral.Comprehension...Vocabulary + Phonological.Skills) +
+              (ot1+ot2+ot3 | SUBJECT) +
+              (ot1+ot2 | SUBJECT:COND),
+            control = lmerControl(optimizer = "bobyqa"), 
+            data = data.trg.allCon, REML = F)
+
+# O + D
+m.OD <- lmer(meanFix ~ (ot1+ot2+ot3)*(COND)*(Oral.Comprehension...Vocabulary + Decoding) +
+              (ot1+ot2+ot3 | SUBJECT) +
+              (ot1+ot2 | SUBJECT:COND),
+            control = lmerControl(optimizer = "bobyqa"), 
+            data = data.trg.allCon, REML = F)
+
+# D + P
+m.DP <- lmer(meanFix ~ (ot1+ot2+ot3)*(COND)*(Decoding + Phonological.Skills) +
+              (ot1+ot2+ot3 | SUBJECT) +
+              (ot1+ot2 | SUBJECT:COND),
+            control = lmerControl(optimizer = "bobyqa"), 
+            data = data.trg.allCon, REML = F)
+
+# D + O
+m.DO <- lmer(meanFix ~ (ot1+ot2+ot3)*(COND)*(Decoding + Oral.Comprehension...Vocabulary) +
+              (ot1+ot2+ot3 | SUBJECT) +
+              (ot1+ot2 | SUBJECT:COND),
+            control = lmerControl(optimizer = "bobyqa"), 
+            data = data.trg.allCon, REML = F)
+```
+
+```{r GCA additional model comparisons, echo=FALSE}
+anova(m.P, m.PO)
+anova(m.P, m.PD)
+anova(m.O, m.OP)
+anova(m.O, m.OD)
+anova(m.D, m.DP)
+anova(m.D, m.DO)
+```
+
 ### GCA Visualization
 ```{r GCA visualization, echo=FALSE, fig.width=10, fig.height=9}
 p_GCA <-
@@ -617,8 +641,7 @@ ggplot(data.trg.allCon, aes(Time, meanFix, shape = COND)) +
          color = guide_legend(title = ""))
 ```
 
-```{r GCA visualization by group, echo=FALSE, fig.width=28, fig.height=10}
-# levels(data.trg.allCon$groups.phono.3) <- c("low (0-33.33%), n = 18", "mid (33.33-66.67%), n = 22", "high (66.67-100%), n =21")
+```{r GCA visualization by group, echo=FALSE, fig.width=9, fig.height=20}
 p_GCA_groups <-
 ggplot(data.trg.allCon, aes(Time, meanFix, shape = COND)) +
   facet_grid(groups.phono.3~.) +
@@ -1044,20 +1067,12 @@ ggplot(subset(gazeSubj.s2, FIX_OBJECT == "target" & Time >= 600 & Time <= 1200),
          alpha = guide_legend(title = "Group"))
 ```
 
-```{r fix prop by item and by POA_PAIR, include=FALSE, eval=FALSE}
+```{r fix prop by item and by POA_CODE, include=FALSE, eval=FALSE}
 gazeItem <- computeFixProp(gazeBins_2000, by="ITEM")
 gazeItem.s <- subset(gazeItem, ((FIX_OBJECT=="T" | FIX_OBJECT=="C") & 
                                   COND!="Filler" & Time>=0))
 gazeItem.s$FIX_OBJECT <- factor(gazeItem.s$FIX_OBJECT, levels=c("T","C","D","X","O"))
 levels(gazeItem.s$FIX_OBJECT) <- c("target","competitor","distractor","cross","other")
-
-gazeItem.s$POA_PAIR <- NA
-gazeItem.s[gazeItem.s$TARGET %in% c("tap"),]$POA_PAIR <- "LA"
-gazeItem.s[gazeItem.s$TARGET %in% c("net","bud","butt","fort","bat","pit","hood","rod"),]$POA_PAIR <- "AL"
-gazeItem.s[gazeItem.s$TARGET %in% c("carp","harp"),]$POA_PAIR <- "LV"
-gazeItem.s[gazeItem.s$TARGET %in% c("beak"),]$POA_PAIR <- "VL"
-gazeItem.s[gazeItem.s$TARGET %in% c("cat","road","knot"),]$POA_PAIR <- "AV"
-gazeItem.s$POA_PAIR <- factor(gazeItem.s$POA_PAIR, levels=c("LA","AL","LV","VL","AV"))
 
 gazeItem.s$POA_CODE <- NA
 gazeItem.s[gazeItem.s$TARGET %in% 
@@ -1072,17 +1087,6 @@ gazeItem.s$POA_CODE <- factor(gazeItem.s$POA_CODE, levels=c("W1-N3-Similar","W1-
 gazeItem.s$`POA_CODE:TARGET` <- paste(gazeItem.s$POA_CODE,":",gazeItem.s$TARGET)
 gazeItem.s$`POA_CODE:TARGET` <- factor(gazeItem.s$`POA_CODE:TARGET`, 
                                        levels = levels(factor(gazeItem.s$`POA_CODE:TARGET`))[c(7:15,1:6)])
-
-# plot by POA_PAIR
-# ggplot(subset(gazeItem.s, FIX_OBJECT=="target" & Time >= 600 & Time <= 1200), 
-#        aes(Time, meanFix, shape=COND)) + 
-#   facet_grid(POA_PAIR+TARGET~.) +
-#   stat_summary(fun.y=mean, geom="line", aes(color=COND)) +
-#   stat_summary(fun.y=mean, geom="point", aes(color=COND)) +
-#   stat_summary(fun.data=mean_se, geom="ribbon", alpha=.2, aes(fill=COND)) +
-#   scale_colour_manual(values=c("blue","red","black")) +
-#   scale_fill_manual(values=c("blue","red","black")) +
-#   scale_shape_manual(values=c(16,15,17))
 
 gazeItem.s$`FIX_OBJECT:COND` <- paste(gazeItem.s$FIX_OBJECT,':',gazeItem.s$COND)
 
@@ -1113,8 +1117,4 @@ ggplot(subset(gazeItem.s,
          shape = guide_legend(title="Fixated Object : Condition"),
          linetype = guide_legend(title="Fixated Object : Condition"))
 
-```
-
-```{r save image}
-save.image("Subcat_Results_Manuscript.RData")
 ```
