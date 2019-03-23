@@ -7,7 +7,7 @@ This repository contains data and analysis scripts as reported in the study of
 
 Run the following command in your terminal or command line
 
-```bash
+```
 git clone https://github.monicaycli/subcat
 ```
 
@@ -22,18 +22,14 @@ running the analysis scripts.
 1. Pull the Docker image: enter the following command in your terminal or
    command line
 
-    ```bash
+    ```
     docker pull monicaycli/subcat
     ```
 
 1. Run an instance of the Docker image:
 
-    ```bash
-    docker run -d \
-    --name=SUBCAT \
-    -p 8787:8787 \
-    -v $(pwd):/home/rstudio \
-    monicaycli/subcat
+    ```
+    docker run -d --name=SUBCAT -p 8787:8787 -v $(pwd):/home/rstudio monicaycli/subcat
     ```
 
     * Note that you can replace `$(pwd)` with any local directory you would
@@ -50,19 +46,19 @@ running the analysis scripts.
 
 1. To stop the container once you are done:
 
-    ```bash
+    ```
     docker container stop SUBCAT
     ```
 
 1. To remove the container instance (not the image itself):
 
-    ```bash
+    ```
     docker container rm SUBCAT
     ```
 
 1. To remove the image:
 
-    ```bash
+    ```
     docker image rm monicaycli/subcat
     ```
 
